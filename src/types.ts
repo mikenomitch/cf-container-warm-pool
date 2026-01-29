@@ -42,20 +42,4 @@ export interface PoolStats {
   config: Required<PoolConfigInternal>;
 }
 
-/**
- * Message types for internal RPC between Worker and WarmPool DO
- */
-export type PoolMessage =
-  | { type: 'get'; id: string }
-  | { type: 'reportStopped'; containerUUID: string }
-  | { type: 'stats' }
-  | { type: 'configure'; config: PoolConfigInternal }
-  | { type: 'shutdownPrewarmed' };
 
-export type PoolResponse =
-  | { type: 'container'; containerId: string }
-  | { type: 'stopped' }
-  | { type: 'stats'; stats: PoolStats }
-  | { type: 'configured' }
-  | { type: 'shutdown' }
-  | { type: 'error'; message: string };

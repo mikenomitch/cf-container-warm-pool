@@ -5,7 +5,7 @@ import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
 // Environment bindings
 export interface Env {
   CONTAINER: DurableObjectNamespace;
-  WARM_POOL: DurableObjectNamespace;
+  WARM_POOL: DurableObjectNamespace<WarmPool>;
 }
 
 /**

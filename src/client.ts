@@ -1,9 +1,9 @@
 import type {
   WarmPoolConfig,
   PoolStats,
-  PoolMessage,
-  PoolResponse,
+  PoolConfigInternal,
 } from './types.js';
+import type { WarmPool } from './pool.js';
 
 /**
  * Client for interacting with a WarmPool Durable Object
@@ -71,94 +71,51 @@ export interface WarmPoolClient {
  * ```
  */
 export function createWarmPool(
-  poolNamespace: DurableObjectNamespace,
-  containerNamespace: DurableObjectNamespace,
+  poolNamespace: DurableObjectNamespace<WarmPool>,
+  containerNamespace: { idFromName(name: string): DurableObjectId; get(id: DurableObjectId): DurableObjectStub },
   config?: WarmPoolConfig
 ): WarmPoolClient {
   const poolName = config?.poolName ?? 'global-pool';
-  const poolStub = getWarmPool(poolNamespace, poolName);
+  const poolId = poolNamespace.idFromName(poolName);
+  const poolStub = poolNamespace.get(poolId);
 
-  const sendMessage = async (stub: DurableObjectStub, message: PoolMessage): Promise<PoolResponse> => {
-    const response = await stub.fetch('http://pool/rpc', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(message),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Pool error: ${error}`);
-    }
-
-    return response.json();
-  };
-
-  // Send config to the pool on first use
-  let configured = false;
-  const ensureConfigured = async () => {
-    if (!configured) {
-      // Send config to DO (excluding poolName which is client-side only)
-      const { poolName: _, ...poolConfig } = config ?? {};
-      await sendMessage(poolStub, { type: 'configure', config: poolConfig });
-      configured = true;
-    }
-  };
+  // Extract pool config (excluding poolName which is client-side only)
+  const { poolName: _, ...poolConfig } = config ?? {};
 
   return {
     async getContainer(id: string): Promise<DurableObjectStub> {
-      await ensureConfigured();
-
-      const response = await sendMessage(poolStub, { type: 'get', id });
-
-      if (response.type === 'error') {
-        throw new Error(response.message);
-      }
-
-      if (response.type !== 'container') {
-        throw new Error(`Unexpected response type: ${response.type}`);
-      }
-
-      const containerUUID = response.containerId;
+      // Send config first to ensure it's always up-to-date (handles redeployments)
+      await poolStub.configure(poolConfig);
+      
+      const containerUUID = await poolStub.getContainer(id);
       const doId = containerNamespace.idFromName(containerUUID);
       return containerNamespace.get(doId);
     },
 
     async stats(): Promise<PoolStats> {
-      await ensureConfigured();
-
-      const response = await sendMessage(poolStub, { type: 'stats' });
-
-      if (response.type === 'error') {
-        throw new Error(response.message);
-      }
-
-      if (response.type !== 'stats') {
-        throw new Error(`Unexpected response type: ${response.type}`);
-      }
-
-      return response.stats;
+      // Send config first to ensure it's always up-to-date (handles redeployments)
+      await poolStub.configure(poolConfig);
+      
+      return poolStub.getStats();
     },
 
     async shutdownPrewarmed(): Promise<void> {
-      await ensureConfigured();
-
-      const response = await sendMessage(poolStub, { type: 'shutdownPrewarmed' });
-
-      if (response.type === 'error') {
-        throw new Error(response.message);
-      }
+      // Send config first to ensure it's always up-to-date (handles redeployments)
+      await poolStub.configure(poolConfig);
+      
+      await poolStub.shutdownPrewarmed();
     },
   };
 }
 
 /**
- * Get the WarmPool Durable Object stub
+ * Get the WarmPool Durable Object stub for RPC calls
  * 
  * Use this to call reportStopped() from your container's onStop() method.
  * 
  * @param poolNamespace - The WarmPool Durable Object namespace binding
  * @param poolName - Name of the pool instance (default: 'global-pool'). Use this if you have multiple container types.
- * @returns The WarmPool Durable Object stub
+ * @returns The WarmPool Durable Object stub with RPC methods
  * 
  * @example
  * ```ts
@@ -172,7 +129,10 @@ export function createWarmPool(
  * }
  * ```
  */
-export function getWarmPool(poolNamespace: DurableObjectNamespace, poolName: string = 'global-pool'): DurableObjectStub {
+export function getWarmPool(
+  poolNamespace: DurableObjectNamespace<WarmPool>,
+  poolName: string = 'global-pool'
+): DurableObjectStub<WarmPool> {
   const poolId = poolNamespace.idFromName(poolName);
   return poolNamespace.get(poolId);
 }

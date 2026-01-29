@@ -2,9 +2,6 @@ import { DurableObject } from 'cloudflare:workers';
 import type {
   PoolConfigInternal,
   PoolStats,
-  PoolMessage,
-  PoolResponse,
-  WarmPoolConfig,
 } from './types.js';
 
 const DEFAULT_CONFIG: Required<PoolConfigInternal> = {
@@ -43,6 +40,8 @@ interface ContainerWithState {
  * 
  * Maintains warm containers ready for immediate use. When a user requests a container
  * by ID, they get a 1:1 mapping that persists. No sharing between user IDs.
+ * 
+ * All public methods are exposed as RPC calls.
  */
 export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONTAINER: DurableObjectNamespace }> extends DurableObject<Env> {
   private config: Required<PoolConfigInternal> = DEFAULT_CONFIG;
@@ -61,6 +60,125 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
   }
+
+  // ===========================
+  // Public RPC Methods
+  // ===========================
+
+  /**
+   * Get a container UUID for the given user ID
+   * - If this ID already has an assigned container, return it
+   * - Otherwise assign a warm container (or start a new one)
+   */
+  async getContainer(userID: string): Promise<string> {
+    await this.init();
+
+    // Check if this user ID already has an assigned container
+    const existingContainerUUID = this.assignments.get(userID);
+    if (existingContainerUUID) {
+      return existingContainerUUID;
+    }
+
+    // Try to assign a warm container
+    if (this.warmContainers.size > 0) {
+      const containerUUID = this.warmContainers.values().next().value as string;
+      this.warmContainers.delete(containerUUID);
+      this.assignments.set(userID, containerUUID);
+      await this.persist();
+      return containerUUID;
+    }
+
+    // No warm containers available - start a new one
+    const containerUUID = await this.startContainer();
+    if (containerUUID) {
+      this.assignments.set(userID, containerUUID);
+      await this.persist();
+      return containerUUID;
+    }
+
+    throw new Error('Failed to start container');
+  }
+
+  /**
+   * Report that a container has stopped - removes it from tracking
+   * Call this from your container's onStop() method
+   */
+  async reportStopped(containerUUID: string): Promise<void> {
+    await this.init();
+    this.removeContainer(containerUUID);
+    await this.persist();
+  }
+
+  /**
+   * Get current pool statistics
+   */
+  async getStats(): Promise<PoolStats> {
+    await this.init();
+
+    return {
+      warm: this.warmContainers.size,
+      assigned: this.assignments.size,
+      total: this.warmContainers.size + this.assignments.size,
+      config: this.config,
+    };
+  }
+
+  /**
+   * Update pool configuration
+   */
+  async configure(config: PoolConfigInternal): Promise<void> {
+    await this.init();
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    await this.ctx.storage.put('config', this.config);
+  }
+
+  /**
+   * Shutdown all pre-warmed (unassigned) containers
+   * Does not affect containers that are assigned to user IDs
+   */
+  async shutdownPrewarmed(): Promise<void> {
+    await this.init();
+
+    for (const containerUUID of this.warmContainers) {
+      try {
+        const stub = this.getContainerStub(containerUUID);
+        await (stub as unknown as ContainerRpc).stop();
+      } catch (error) {
+        console.error(`Failed to stop container ${containerUUID}:`, error);
+      }
+    }
+    this.warmContainers.clear();
+    await this.persist();
+  }
+
+  // ===========================
+  // Alarm Handler
+  // ===========================
+
+  /**
+   * Alarm handler - checks container health and replenishes warm containers
+   */
+  async alarm(): Promise<void> {
+    await this.init();
+
+    try {
+      // First, check health of all tracked containers and remove any that stopped
+      // This handles cases where onStop() failed to report
+      await this.checkContainerHealth();
+
+      // Then replenish to maintain warmTarget
+      await this.replenishPool();
+    } catch (error) {
+      console.error('Alarm handler error:', error);
+    }
+
+    // Schedule next alarm
+    await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
+  }
+
+  // ===========================
+  // Private Methods
+  // ===========================
 
   /**
    * Initialize the pool - loads state from storage
@@ -102,92 +220,6 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Alarm handler - checks container health and replenishes warm containers
-   */
-  async alarm(): Promise<void> {
-    await this.init();
-
-    try {
-      // First, check health of all tracked containers and remove any that stopped
-      // This handles cases where onStop() failed to report
-      await this.checkContainerHealth();
-
-      // Then replenish to maintain warmTarget
-      await this.replenishPool();
-    } catch (error) {
-      console.error('Alarm handler error:', error);
-    }
-
-    // Schedule next alarm
-    await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
-  }
-
-  /**
-   * Main fetch handler - processes pool messages
-   */
-  async fetch(request: Request): Promise<Response> {
-    await this.init();
-
-    try {
-      const message = await request.json() as PoolMessage;
-      const response = await this.handleMessage(message);
-      return Response.json(response);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      return Response.json({ type: 'error', message } as PoolResponse, { status: 500 });
-    }
-  }
-
-  private async handleMessage(message: PoolMessage): Promise<PoolResponse> {
-    switch (message.type) {
-      case 'get':
-        return this.handleGet(message.id);
-      case 'reportStopped':
-        return this.handleReportStopped(message.containerUUID);
-      case 'stats':
-        return this.handleStats();
-      case 'configure':
-        return this.handleConfigure(message.config);
-      case 'shutdownPrewarmed':
-        return this.handleShutdownPrewarmed();
-      default:
-        throw new Error(`Unknown message type: ${(message as PoolMessage).type}`);
-    }
-  }
-
-  /**
-   * Get a container for the given user ID
-   * - If this ID already has an assigned container, return it
-   * - Otherwise assign a warm container (or start a new one)
-   */
-  private async handleGet(userID: string): Promise<PoolResponse> {
-    // Check if this user ID already has an assigned container
-    const existingContainerUUID = this.assignments.get(userID);
-    if (existingContainerUUID) {
-      return { type: 'container', containerId: existingContainerUUID };
-    }
-
-    // Try to assign a warm container
-    if (this.warmContainers.size > 0) {
-      const containerUUID = this.warmContainers.values().next().value as string;
-      this.warmContainers.delete(containerUUID);
-      this.assignments.set(userID, containerUUID);
-      await this.persist();
-      return { type: 'container', containerId: containerUUID };
-    }
-
-    // No warm containers available - start a new one
-    const containerUUID = await this.startContainer();
-    if (containerUUID) {
-      this.assignments.set(userID, containerUUID);
-      await this.persist();
-      return { type: 'container', containerId: containerUUID };
-    }
-
-    throw new Error('Failed to start container');
-  }
-
-  /**
    * Remove a container from pool tracking (warm or assigned)
    * @returns true if the container was found and removed
    */
@@ -209,61 +241,6 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     }
 
     return removed;
-  }
-
-  /**
-   * Called when a container stops - removes it from tracking
-   * This should be called from the container's onStop() method
-   */
-  private async handleReportStopped(containerUUID: string): Promise<PoolResponse> {
-    this.removeContainer(containerUUID);
-    await this.persist();
-    return { type: 'stopped' };
-  }
-
-  /**
-   * Called via RPC from container's onStop() method
-   */
-  async reportStopped(containerUUID: string): Promise<void> {
-    await this.init();
-    await this.handleReportStopped(containerUUID);
-  }
-
-  private handleStats(): PoolResponse {
-    const stats: PoolStats = {
-      warm: this.warmContainers.size,
-      assigned: this.assignments.size,
-      total: this.warmContainers.size + this.assignments.size,
-      config: this.config,
-    };
-
-    return { type: 'stats', stats };
-  }
-
-  /**
-   * Update pool configuration
-   */
-  private async handleConfigure(config: PoolConfigInternal): Promise<PoolResponse> {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    await this.ctx.storage.put('config', this.config);
-    return { type: 'configured' };
-  }
-
-  /**
-   * Shutdown only the pre-warmed (unassigned) containers
-   */
-  private async handleShutdownPrewarmed(): Promise<PoolResponse> {
-    for (const containerUUID of this.warmContainers) {
-      try {
-        const stub = this.getContainerStub(containerUUID);
-        await (stub as unknown as ContainerRpc).stop();
-      } catch (error) {
-        console.error(`Failed to stop container ${containerUUID}:`, error);
-      }
-    }
-    this.warmContainers.clear();
-    await this.persist();
-    return { type: 'shutdown' };
   }
 
   /**
