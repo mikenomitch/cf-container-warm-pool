@@ -21,6 +21,24 @@ interface ContainerRpc {
 }
 
 /**
+ * State returned by Container.getState()
+ * @see https://github.com/cloudflare/containers/blob/main/src/types/index.ts
+ */
+type ContainerState = {
+  lastChange: number;
+  status: 'running' | 'stopping' | 'stopped' | 'healthy' | 'stopped_with_code';
+  exitCode?: number;
+};
+
+/**
+ * Interface for checking container state via RPC.
+ * The Container class from @cloudflare/containers exposes getState() by default.
+ */
+interface ContainerWithState {
+  getState(): Promise<ContainerState>;
+}
+
+/**
  * WarmPool Durable Object - manages a pool of pre-warmed containers
  * 
  * Maintains warm containers ready for immediate use. When a user requests a container
@@ -34,6 +52,9 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   
   /** Maps user-provided IDs to container UUIDs (1:1, no sharing) */
   private assignments: Map<string, string> = new Map();
+  
+  /** Container UUIDs currently being started - don't mark these as stopped during health check */
+  private startingContainers: Set<string> = new Set();
   
   private initialized = false;
 
@@ -81,12 +102,17 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Alarm handler - replenishes warm containers to reach warmTarget
+   * Alarm handler - checks container health and replenishes warm containers
    */
   async alarm(): Promise<void> {
     await this.init();
 
     try {
+      // First, check health of all tracked containers and remove any that stopped
+      // This handles cases where onStop() failed to report
+      await this.checkContainerHealth();
+
+      // Then replenish to maintain warmTarget
       await this.replenishPool();
     } catch (error) {
       console.error('Alarm handler error:', error);
@@ -160,21 +186,35 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Called when a container stops - removes it from tracking
-   * This should be called from the container's onStop() method
+   * Remove a container from pool tracking (warm or assigned)
+   * @returns true if the container was found and removed
    */
-  private async handleReportStopped(containerUUID: string): Promise<PoolResponse> {
+  private removeContainer(containerUUID: string): boolean {
+    let removed = false;
+
     // Remove from warm containers if present
-    this.warmContainers.delete(containerUUID);
+    if (this.warmContainers.delete(containerUUID)) {
+      removed = true;
+    }
 
     // Find and remove from assignments if present
     for (const [userID, uuid] of this.assignments) {
       if (uuid === containerUUID) {
         this.assignments.delete(userID);
+        removed = true;
         break;
       }
     }
 
+    return removed;
+  }
+
+  /**
+   * Called when a container stops - removes it from tracking
+   * This should be called from the container's onStop() method
+   */
+  private async handleReportStopped(containerUUID: string): Promise<PoolResponse> {
+    this.removeContainer(containerUUID);
     await this.persist();
     return { type: 'stopped' };
   }
@@ -221,6 +261,9 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   private async startContainer(): Promise<string | null> {
     const containerUUID = crypto.randomUUID();
 
+    // Track that we're starting this container to avoid false positives in health check
+    this.startingContainers.add(containerUUID);
+
     try {
       const stub = this.getContainerStub(containerUUID);
       const rpc = stub as unknown as ContainerRpc;
@@ -233,6 +276,63 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     } catch (error) {
       console.error(`Failed to start container ${containerUUID}:`, error);
       return null;
+    } finally {
+      this.startingContainers.delete(containerUUID);
+    }
+  }
+
+  /**
+   * Check if a container is still running by calling getState() RPC method
+   * 
+   * The Container class from @cloudflare/containers exposes getState() by default.
+   * A container is considered stopped if its status is 'stopped' or 'stopped_with_code'.
+   */
+  private async isContainerRunning(containerUUID: string): Promise<boolean> {
+    // Don't check containers that are currently being started
+    if (this.startingContainers.has(containerUUID)) {
+      return true;
+    }
+
+    try {
+      const stub = this.getContainerStub(containerUUID);
+      const container = stub as unknown as ContainerWithState;
+      const state = await container.getState();
+      
+      // Container is stopped if status is 'stopped' or 'stopped_with_code'
+      const isStopped = state.status === 'stopped' || state.status === 'stopped_with_code';
+      return !isStopped;
+    } catch (error) {
+      // If the call fails, assume still running (rely on onStop for cleanup)
+      // This could happen if the DO is hibernating or the method throws
+      console.warn(`Failed to check running status for ${containerUUID}:`, error);
+      return true;
+    }
+  }
+
+  /**
+   * Check all tracked containers and remove any that have stopped
+   * This provides resilience if onStop() fails to report
+   */
+  private async checkContainerHealth(): Promise<void> {
+    const allContainerUUIDs = [
+      ...this.warmContainers,
+      ...this.assignments.values(),
+    ];
+
+    let anyRemoved = false;
+
+    for (const containerUUID of allContainerUUIDs) {
+      const running = await this.isContainerRunning(containerUUID);
+      if (!running) {
+        console.log(`Health check: container ${containerUUID} is not running, removing from pool`);
+        if (this.removeContainer(containerUUID)) {
+          anyRemoved = true;
+        }
+      }
+    }
+
+    if (anyRemoved) {
+      await this.persist();
     }
   }
 

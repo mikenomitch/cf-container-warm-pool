@@ -2,8 +2,8 @@
 
 A warm pool manager for [Cloudflare Containers](https://developers.cloudflare.com/containers/) and the [Sandbox SDK](https://github.com/cloudflare/sandbox-sdk). Pre-warm containers and acquire them on-demand with automatic lifecycle management.
 
-> **Note:** This library pre-warms containers to reduce cold start times for end users. You can use it to start containers ahead of time and run any necessary setup before requests arrive.
->
+This library pre-warms containers to reduce cold start times for end users. You can use it to start containers ahead of time and run any necessary setup before requests arrive.
+
 > **This is a temporary solution.** Cloudflare plans to make this unnecessary with faster default start times using disk and memory snapshots. Use this library now, then remove it once that functionality ships.
 >
 > **Cost consideration:** Pre-warmed containers are billed while sitting in the pool. This is the main tradeoff of using this library.
@@ -20,12 +20,12 @@ npm install cf-container-warm-pool @cloudflare/containers
 import { Container } from '@cloudflare/containers';
 import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
 
-// Define your container with required onStop handler
+// Define your container with optional (but recommended) onStop handler
 export class MyContainer extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = '10m';
 
-  // REQUIRED: Notify the pool when this container stops
+  // RECOMMENDED: Notify the pool immediately when this container stops
   async onStop() {
     const pool = getWarmPool(this.env.WARM_POOL);
     await pool.reportStopped(this.ctx.id.toString());
@@ -50,9 +50,9 @@ export default {
 };
 ```
 
-## Required: Container `onStop` Handler
+## Recommended: Container `onStop` Handler
 
-**Your container class must implement `onStop()` to notify the pool when a container stops.** This allows the pool to track which containers are still active and replenish warm containers as needed.
+Implement `onStop()` in your container class to notify the pool immediately when a container stops:
 
 ```ts
 export class MyContainer extends Container<Env> {
@@ -63,7 +63,9 @@ export class MyContainer extends Container<Env> {
 }
 ```
 
-Without this, the pool won't know when containers stop (due to `sleepAfter` timeout, crashes, etc.) and will have stale tracking data.
+This is optional but preferred - it allows the pool to immediately remove stopped containers and replenish warm ones without waiting for the next health check.
+
+As a fallback, the pool runs health checks each `refreshInterval` using the Container's built-in `getState()` method. This catches containers that stopped without reporting (e.g., if `onStop()` failed or wasn't implemented).
 
 ## Configuration
 
@@ -172,7 +174,9 @@ await pool.shutdownPrewarmed();
 
 4. **Container lifecycle**: Containers manage their own lifecycle via `sleepAfter`. When they stop, `onStop()` notifies the pool
 
-5. **Pool refresh**: A background alarm replenishes warm containers to maintain `warmTarget`
+5. **Health checks**: Each refresh interval, the pool checks all tracked containers via `isRunning()` (if implemented) and removes any that have stopped
+
+6. **Pool refresh**: A background alarm replenishes warm containers to maintain `warmTarget`
 
 ## Example
 
@@ -195,7 +199,7 @@ This library also works with the [Sandbox SDK](https://github.com/cloudflare/san
 import { Sandbox } from '@cloudflare/sandbox';
 import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
 
-// Extend Sandbox with required onStop handler
+// Extend Sandbox with optional (but recommended) onStop handler
 export class MySandbox extends Sandbox<Env> {
   async onStop() {
     const pool = getWarmPool(this.env.WARM_POOL);

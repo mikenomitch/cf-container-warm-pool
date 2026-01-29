@@ -24,8 +24,9 @@ export class MyContainer extends Container<Env> {
   }
 
   /**
-   * REQUIRED: Notify the warm pool when this container stops.
-   * This allows the pool to track which containers are still active.
+   * RECOMMENDED: Notify the warm pool immediately when this container stops.
+   * This allows the pool to remove stopped containers and replenish warm ones
+   * without waiting for the next health check interval.
    */
   async onStop() {
     // @ts-ignore - env and ctx exist on Container, types are broken in @cloudflare/containers
