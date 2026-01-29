@@ -67,7 +67,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
 
   /**
    * Get a container UUID for the given user ID
-   * - If this ID already has an assigned container, return it
+   * - If this ID already has an assigned container and it's still running, return it
    * - Otherwise assign a warm container (or start a new one)
    */
   async getContainer(userID: string): Promise<string> {
@@ -76,7 +76,14 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     // Check if this user ID already has an assigned container
     const existingContainerUUID = this.assignments.get(userID);
     if (existingContainerUUID) {
-      return existingContainerUUID;
+      // Verify the container is still running
+      const running = await this.isContainerRunning(existingContainerUUID);
+      if (running) {
+        return existingContainerUUID;
+      }
+      // Container stopped - remove stale assignment and assign a new one
+      this.assignments.delete(userID);
+      await this.persist();
     }
 
     // Try to assign a warm container
