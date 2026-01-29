@@ -298,7 +298,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
    * Check if a container is still running by calling getState() RPC method
    * 
    * The Container class from @cloudflare/containers exposes getState() by default.
-   * A container is considered stopped if its status is 'stopped' or 'stopped_with_code'.
+   * A container is considered running only if its status is 'running' or 'healthy'.
    */
   private async isContainerRunning(containerUUID: string): Promise<boolean> {
     // Don't check containers that are currently being started
@@ -311,14 +311,14 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       const container = stub as unknown as ContainerWithState;
       const state = await container.getState();
       
-      // Container is stopped if status is 'stopped' or 'stopped_with_code'
-      const isStopped = state.status === 'stopped' || state.status === 'stopped_with_code';
-      return !isStopped;
+      // Container is running only if status is 'running' or 'healthy'
+      const isRunning = state.status === 'running' || state.status === 'healthy';
+      return isRunning;
     } catch (error) {
-      // If the call fails, assume still running (rely on onStop for cleanup)
-      // This could happen if the DO is hibernating or the method throws
-      console.warn(`Failed to check running status for ${containerUUID}:`, error);
-      return true;
+      // If the call fails, assume stopped - better to clean up and reassign
+      // than to keep a stale reference
+      console.warn(`Failed to check running status for ${containerUUID}, assuming stopped:`, error);
+      return false;
     }
   }
 

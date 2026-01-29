@@ -73,6 +73,7 @@ export default {
     }
 
     // Route: /instance/:id/* - Route to a specific container by ID
+    // This is the only way to access containers in this example
     const instanceMatch = url.pathname.match(/^\/instance\/([^/]+)(\/.*)?$/);
     if (instanceMatch) {
       const instanceId = instanceMatch[1];
@@ -88,12 +89,9 @@ export default {
       return container.fetch(containerRequest);
     }
 
-    // Default: Get a container by session ID header
-    // Same ID will always return the same container (1:1 mapping)
-    const sessionId = request.headers.get("x-session-id") || "default";
-    const container = await pool.getContainer(sessionId);
-
-    // Forward the request to the container
-    return container.fetch(request);
+    // Unknown route - return 404 instead of accidentally creating/keeping containers alive
+    return new Response("Not Found. Use /instance/:id to access a container, or /stats to view pool stats.", { 
+      status: 404 
+    });
   },
 };
