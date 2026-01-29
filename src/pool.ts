@@ -6,7 +6,7 @@ import type {
 
 const DEFAULT_CONFIG: Required<PoolConfigInternal> = {
   warmTarget: 5,
-  refreshInterval: 30 * 1000, // 30 seconds
+  refreshInterval: 10 * 1000, // 10 seconds
 };
 
 /**
@@ -15,6 +15,7 @@ const DEFAULT_CONFIG: Required<PoolConfigInternal> = {
 interface ContainerRpc {
   startAndWaitForPorts(): Promise<void>;
   stop(signal?: string): Promise<void>;
+  renewActivityTimeout(): void;
 }
 
 /**
@@ -163,7 +164,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   // ===========================
 
   /**
-   * Alarm handler - checks container health and replenishes warm containers
+   * Alarm handler - checks container health, adjusts pool size, and keeps warm containers alive
    */
   async alarm(): Promise<void> {
     await this.init();
@@ -175,12 +176,29 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
 
       // Then adjust pool size to maintain warmTarget
       await this.adjustPool();
+
+      // Keep warm containers alive by renewing their activity timeout
+      await this.keepWarmContainersAlive();
     } catch (error) {
       console.error('Alarm handler error:', error);
     }
 
     // Schedule next alarm
     await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
+  }
+
+  /**
+   * Renew activity timeout on all warm containers to prevent them from going stale
+   */
+  private async keepWarmContainersAlive(): Promise<void> {
+    for (const containerUUID of this.warmContainers) {
+      try {
+        const stub = this.getContainerStub(containerUUID);
+        (stub as unknown as ContainerRpc).renewActivityTimeout();
+      } catch (error) {
+        console.error(`Failed to renew activity timeout for ${containerUUID}:`, error);
+      }
+    }
   }
 
   // ===========================

@@ -23,7 +23,7 @@ import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
 // Define your container with optional (but recommended) onStop handler
 export class MyContainer extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = '10m';
+  sleepAfter = '5m';
 
   // RECOMMENDED: Notify the pool immediately when this container stops
   async onStop() {
@@ -115,8 +115,10 @@ Creates a warm pool client.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `warmTarget` | number | 5 | Target number of warm (unassigned) containers to maintain ready for immediate use |
-| `refreshInterval` | number | 30000 | How often to replenish warm containers (ms) |
+| `refreshInterval` | number | 10000 | How often to check health and replenish warm containers (ms) |
 | `poolName` | string | 'global-pool' | Name of the pool instance. Use this if you have multiple container types and need separate warm pools. |
+
+**Important:** Your container's `sleepAfter` must be longer than `refreshInterval`. The pool renews the activity timeout on warm containers each refresh cycle to keep them alive. If `sleepAfter` is shorter than `refreshInterval`, containers may stop before the next refresh.
 
 ### `getWarmPool(poolNamespace, poolName?)`
 

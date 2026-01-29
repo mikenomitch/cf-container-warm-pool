@@ -11,7 +11,7 @@ export interface WarmPoolConfig {
 
   /**
    * How often to check and replenish warm containers (ms)
-   * @default 30000 (30 seconds)
+   * @default 10000 (10 seconds)
    */
   refreshInterval?: number;
 
