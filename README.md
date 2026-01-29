@@ -1,9 +1,7 @@
 # cf-container-warm-pool
 
-A warm pool manager for [Cloudflare Containers](https://developers.cloudflare.com/containers/) and the [Sandbox SDK](https://github.com/cloudflare/sandbox-sdk). Pre-warm containers and acquire them on-demand with automatic lifecycle management.
+A warm pool manager for [Cloudflare Containers](https://developers.cloudflare.com/containers/) and the [Sandboxs](https://github.com/cloudflare/sandbox-sdk). Pre-warm containers and acquire them on-demand with automatic lifecycle management. Cloudflare will already pre-warm container instances behind the scenes so startup times can often be a little over a second without this library. This provides an additional layer for extra speed and buffer.
 
-> **Note:** This library pre-warms containers to reduce cold start times for end users. You can use it to start containers ahead of time and run any necessary setup before requests arrive.
->
 > **This is a temporary solution.** Cloudflare plans to make this unnecessary with faster default start times using disk and memory snapshots. Use this library now, then remove it once that functionality ships.
 >
 > **Cost consideration:** Pre-warmed containers are billed while sitting in the pool. This is the main tradeoff of using this library.
@@ -24,16 +22,20 @@ import { createWarmPool, WarmPool } from 'cf-container-warm-pool';
 export class MyContainer extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = '10m';
+  
+  onStart() {
+    // anything to do when the container is initially started/warmed
+  }
 }
 
-// Export the WarmPool DO
+// Register the WarmPool Storage
 export { WarmPool };
 
 // Use in your Worker
 export default {
   async fetch(request: Request, env: Env) {
     const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
-      warmTarget: 3,
+      warmTarget: 3, // how many additional containers to keep ready
     });
 
     // Get a container by ID (sticky sessions)
@@ -52,7 +54,7 @@ Configure your `wrangler.jsonc`:
 {
   "name": "my-app",
   "main": "src/index.ts",
-  "compatibility_date": "2025-01-13",
+  "compatibility_date": "2026-01-28",
 
   "containers": [
     {
@@ -65,15 +67,19 @@ Configure your `wrangler.jsonc`:
 
   "durable_objects": {
     "bindings": [
-      { "class_name": "MyContainer", "name": "CONTAINER" },
-      { "class_name": "WarmPool", "name": "WARM_POOL" }
+      { "class_name": "MyContainer", "name": "CONTAINER" }, // your original container binding
+      { "class_name": "WarmPool", "name": "WARM_POOL" } // additional binding for the pool
     ]
   },
 
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["MyContainer", "WarmPool"]
+      "new_sqlite_classes": ["MyContainer"] // your original migration
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["WarmPool"] // additional migration for the warm pool
     }
   ]
 }
@@ -92,8 +98,6 @@ Creates a warm pool client.
 | `warmTarget` | number | 1 | Target number of warm (unacquired) containers to maintain ready for immediate use |
 | `acquireTimeout` | number | 300000 | Auto-release after this many ms |
 | `refreshInterval` | number | 30000 | How often to check for expired acquisitions and replenish pool (ms) |
-
-Port configuration is handled by your `Container` class via `defaultPort` and `requiredPorts`.
 
 ### `pool.getContainer(id)`
 
@@ -197,31 +201,3 @@ export default {
   }
 };
 ```
-
-Your `wrangler.jsonc` for Sandbox:
-
-```jsonc
-{
-  "containers": [
-    {
-      "class_name": "Sandbox",
-      "image": "ghcr.io/cloudflare/sandbox:latest",
-      "max_instances": 10
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "class_name": "Sandbox", "name": "SANDBOX" },
-      { "class_name": "WarmPool", "name": "WARM_POOL" }
-    ]
-  },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Sandbox"] },
-    { "tag": "v2", "new_sqlite_classes": ["WarmPool"] }
-  ]
-}
-```
-
-## License
-
-MIT
