@@ -146,6 +146,8 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
         return this.handleReportStopped(message.containerUUID);
       case 'stats':
         return this.handleStats();
+      case 'configure':
+        return this.handleConfigure(message.config);
       case 'shutdownPrewarmed':
         return this.handleShutdownPrewarmed();
       default:
@@ -236,6 +238,15 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     };
 
     return { type: 'stats', stats };
+  }
+
+  /**
+   * Update pool configuration
+   */
+  private async handleConfigure(config: PoolConfigInternal): Promise<PoolResponse> {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    await this.ctx.storage.put('config', this.config);
+    return { type: 'configured' };
   }
 
   /**

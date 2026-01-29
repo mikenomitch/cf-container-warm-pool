@@ -9,7 +9,7 @@
     "build-container": "docker build -t warm-pool-example ."
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.0.14",
+    "@cloudflare/containers": "^0.1.0",
     "cf-container-warm-pool": "file:.."
   },
   "devDependencies": {

@@ -78,16 +78,6 @@ export function createWarmPool(
   const poolName = config?.poolName ?? 'global-pool';
   const poolStub = getWarmPool(poolNamespace, poolName);
 
-  // Trigger initial warmup on first use
-  let initialized = false;
-  const ensureInitialized = async () => {
-    if (!initialized && config?.warmTarget) {
-      // Just getting stats will trigger the alarm which handles warmup
-      await sendMessage(poolStub, { type: 'stats' });
-      initialized = true;
-    }
-  };
-
   const sendMessage = async (stub: DurableObjectStub, message: PoolMessage): Promise<PoolResponse> => {
     const response = await stub.fetch('http://pool/rpc', {
       method: 'POST',
@@ -103,9 +93,20 @@ export function createWarmPool(
     return response.json();
   };
 
+  // Send config to the pool on first use
+  let configured = false;
+  const ensureConfigured = async () => {
+    if (!configured) {
+      // Send config to DO (excluding poolName which is client-side only)
+      const { poolName: _, ...poolConfig } = config ?? {};
+      await sendMessage(poolStub, { type: 'configure', config: poolConfig });
+      configured = true;
+    }
+  };
+
   return {
     async getContainer(id: string): Promise<DurableObjectStub> {
-      await ensureInitialized();
+      await ensureConfigured();
 
       const response = await sendMessage(poolStub, { type: 'get', id });
 
@@ -123,6 +124,8 @@ export function createWarmPool(
     },
 
     async stats(): Promise<PoolStats> {
+      await ensureConfigured();
+
       const response = await sendMessage(poolStub, { type: 'stats' });
 
       if (response.type === 'error') {
@@ -137,6 +140,8 @@ export function createWarmPool(
     },
 
     async shutdownPrewarmed(): Promise<void> {
+      await ensureConfigured();
+
       const response = await sendMessage(poolStub, { type: 'shutdownPrewarmed' });
 
       if (response.type === 'error') {
