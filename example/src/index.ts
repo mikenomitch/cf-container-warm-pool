@@ -1,6 +1,6 @@
 // @ts-ignore - @cloudflare/containers has broken type exports, but wrangler handles it correctly
 import { Container } from '@cloudflare/containers';
-import { createWarmPool, WarmPool } from 'cf-container-warm-pool';
+import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
 
 // Environment bindings
 export interface Env {
@@ -19,13 +19,19 @@ export class MyContainer extends Container<Env> {
   // How long before an idle container is stopped
   sleepAfter = '10m';
 
-  // Lifecycle hooks (optional)
   onStart() {
     console.log('Container started');
   }
 
-  onStop({ exitCode }: { exitCode: number }) {
-    console.log(`Container stopped with exit code: ${exitCode}`);
+  /**
+   * REQUIRED: Notify the warm pool when this container stops.
+   * This allows the pool to track which containers are still active.
+   */
+  async onStop() {
+    // @ts-ignore - env and ctx exist on Container, types are broken in @cloudflare/containers
+    const pool = getWarmPool(this.env.WARM_POOL);
+    // @ts-ignore
+    await pool.reportStopped(this.ctx.id.toString());
   }
 }
 
@@ -41,10 +47,8 @@ export default {
 
     // Create the warm pool client with configuration
     const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
-      // Target number of warm (unacquired) containers to maintain
+      // Target number of warm (unassigned) containers to maintain
       warmTarget: 3,
-      // Release containers after 5 minutes if not explicitly released
-      acquireTimeout: 5 * 60 * 1000,
     });
 
     // Route: GET /stats - Show pool statistics
@@ -55,20 +59,14 @@ export default {
       });
     }
 
-    // Route: POST /warmup - Manually trigger warmup
-    if (url.pathname === '/warmup' && request.method === 'POST') {
-      await pool.warmup();
-      return new Response('Warmup initiated', { status: 202 });
-    }
-
-    // Route: POST /shutdown - Stop all containers
-    if (url.pathname === '/shutdown' && request.method === 'POST') {
-      await pool.shutdownAll();
-      return new Response('Shutdown complete', { status: 200 });
+    // Route: POST /shutdown-prewarmed - Stop all pre-warmed containers
+    if (url.pathname === '/shutdown-prewarmed' && request.method === 'POST') {
+      await pool.shutdownPrewarmed();
+      return new Response('Pre-warmed containers shutdown complete', { status: 200 });
     }
 
     // Get a container by session ID
-    // Same ID will return the same container (sticky sessions)
+    // Same ID will always return the same container (1:1 mapping)
     const sessionId = request.headers.get('x-session-id') || 'default';
     const container = await pool.getContainer(sessionId);
     

@@ -1,6 +1,5 @@
 import type {
   WarmPoolConfig,
-  AcquireOptions,
   PoolStats,
   PoolMessage,
   PoolResponse,
@@ -26,9 +25,9 @@ export interface WarmPoolClient {
   /**
    * Get a container by ID from the warm pool
    * 
-   * If a warm container is available, it will be assigned to this ID.
-   * If this ID already has an assigned container, that container is returned.
-   * If no warm containers are available, a new one is started.
+   * If this ID already has an assigned container, returns the same container.
+   * If not, assigns a warm container from the pool.
+   * If no warm containers available, starts a new one.
    * 
    * @param id - Unique identifier for this container session
    * @returns A container stub ready to use
@@ -36,31 +35,14 @@ export interface WarmPoolClient {
   getContainer(id: string): Promise<DurableObjectStub>;
 
   /**
-   * Release a container back to the warm pool
-   * 
-   * Call this when you're done with a container to return it to the pool
-   * for reuse by other requests.
-   * 
-   * @param id - The container ID to release
-   */
-  releaseContainer(id: string): Promise<void>;
-
-  /**
    * Get current pool statistics
    */
   stats(): Promise<PoolStats>;
 
   /**
-   * Manually trigger warmup of containers
-   * 
-   * @param count - Number of containers to warm (defaults to warmTarget)
+   * Shutdown all pre-warmed (unassigned) containers
    */
-  warmup(count?: number): Promise<void>;
-
-  /**
-   * Shutdown all containers in the pool
-   */
-  shutdownAll(): Promise<void>;
+  shutdownPrewarmed(): Promise<void>;
 }
 
 /**
@@ -93,16 +75,16 @@ export function createWarmPool(
   containerNamespace: DurableObjectNamespace,
   config?: WarmPoolConfig
 ): WarmPoolClient {
-  // Use a singleton pool instance per namespace
-  const poolId = poolNamespace.idFromName('global-pool');
-  const poolStub = poolNamespace.get(poolId);
+  const poolName = config?.poolName ?? 'global-pool';
+  const poolStub = getWarmPool(poolNamespace, poolName);
 
-  // Configure the pool on first use
-  let configured = false;
-  const ensureConfigured = async () => {
-    if (!configured && config) {
-      await sendMessage(poolStub, { type: 'warmup', count: config.warmTarget });
-      configured = true;
+  // Trigger initial warmup on first use
+  let initialized = false;
+  const ensureInitialized = async () => {
+    if (!initialized && config?.warmTarget) {
+      // Just getting stats will trigger the alarm which handles warmup
+      await sendMessage(poolStub, { type: 'stats' });
+      initialized = true;
     }
   };
 
@@ -123,7 +105,7 @@ export function createWarmPool(
 
   return {
     async getContainer(id: string): Promise<DurableObjectStub> {
-      await ensureConfigured();
+      await ensureInitialized();
 
       const response = await sendMessage(poolStub, { type: 'get', id });
 
@@ -135,17 +117,9 @@ export function createWarmPool(
         throw new Error(`Unexpected response type: ${response.type}`);
       }
 
-      const containerId = response.containerId;
-      const doId = containerNamespace.idFromName(containerId);
+      const containerUUID = response.containerId;
+      const doId = containerNamespace.idFromName(containerUUID);
       return containerNamespace.get(doId);
-    },
-
-    async releaseContainer(id: string): Promise<void> {
-      const response = await sendMessage(poolStub, { type: 'release', id });
-
-      if (response.type === 'error') {
-        throw new Error(response.message);
-      }
     },
 
     async stats(): Promise<PoolStats> {
@@ -162,20 +136,38 @@ export function createWarmPool(
       return response.stats;
     },
 
-    async warmup(count?: number): Promise<void> {
-      const response = await sendMessage(poolStub, { type: 'warmup', count });
-
-      if (response.type === 'error') {
-        throw new Error(response.message);
-      }
-    },
-
-    async shutdownAll(): Promise<void> {
-      const response = await sendMessage(poolStub, { type: 'shutdown' });
+    async shutdownPrewarmed(): Promise<void> {
+      const response = await sendMessage(poolStub, { type: 'shutdownPrewarmed' });
 
       if (response.type === 'error') {
         throw new Error(response.message);
       }
     },
   };
+}
+
+/**
+ * Get the WarmPool Durable Object stub
+ * 
+ * Use this to call reportStopped() from your container's onStop() method.
+ * 
+ * @param poolNamespace - The WarmPool Durable Object namespace binding
+ * @param poolName - Name of the pool instance (default: 'global-pool'). Use this if you have multiple container types.
+ * @returns The WarmPool Durable Object stub
+ * 
+ * @example
+ * ```ts
+ * import { getWarmPool } from 'cf-container-warm-pool';
+ * 
+ * export class MyContainer extends Container<Env> {
+ *   async onStop() {
+ *     const pool = getWarmPool(this.env.WARM_POOL);
+ *     await pool.reportStopped(this.ctx.id.toString());
+ *   }
+ * }
+ * ```
+ */
+export function getWarmPool(poolNamespace: DurableObjectNamespace, poolName: string = 'global-pool'): DurableObjectStub {
+  const poolId = poolNamespace.idFromName(poolName);
+  return poolNamespace.get(poolId);
 }

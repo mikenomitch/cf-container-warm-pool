@@ -1,16 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import type {
-  WarmPoolConfig,
-  PooledContainer,
-  ContainerStatus,
+  PoolConfigInternal,
   PoolStats,
   PoolMessage,
   PoolResponse,
+  WarmPoolConfig,
 } from './types.js';
 
-const DEFAULT_CONFIG: Required<WarmPoolConfig> = {
-  warmTarget: 1,
-  acquireTimeout: 5 * 60 * 1000, // 5 minutes
+const DEFAULT_CONFIG: Required<PoolConfigInternal> = {
+  warmTarget: 5,
   refreshInterval: 30 * 1000, // 30 seconds
 };
 
@@ -20,20 +18,23 @@ const DEFAULT_CONFIG: Required<WarmPoolConfig> = {
 interface ContainerRpc {
   startAndWaitForPorts(): Promise<void>;
   stop(signal?: string): Promise<void>;
-  getStatus(): Promise<string>;
 }
 
 /**
  * WarmPool Durable Object - manages a pool of pre-warmed containers
  * 
- * This DO maintains state about which containers are warm, acquired, or warming.
- * It handles the lifecycle of keeping containers warm and ready for use.
+ * Maintains warm containers ready for immediate use. When a user requests a container
+ * by ID, they get a 1:1 mapping that persists. No sharing between user IDs.
  */
 export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONTAINER: DurableObjectNamespace }> extends DurableObject<Env> {
-  private config: Required<WarmPoolConfig> = DEFAULT_CONFIG;
-  private containers: Map<string, PooledContainer> = new Map();
-  // Maps user-provided IDs to container IDs
+  private config: Required<PoolConfigInternal> = DEFAULT_CONFIG;
+  
+  /** Container UUIDs that are warm and available for assignment */
+  private warmContainers: Set<string> = new Set();
+  
+  /** Maps user-provided IDs to container UUIDs (1:1, no sharing) */
   private assignments: Map<string, string> = new Map();
+  
   private initialized = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -41,28 +42,14 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Configure the warm pool settings
-   */
-  configure(config: WarmPoolConfig): void {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-  }
-
-  /**
-   * Initialize the pool - loads state and starts warmup
+   * Initialize the pool - loads state from storage
    */
   private async init(): Promise<void> {
     if (this.initialized) return;
 
-    // Load persisted state
-    const stored = await this.ctx.storage.get<Map<string, PooledContainer>>('containers');
-    if (stored) {
-      this.containers = new Map(stored);
-      // Reset any containers that were in transient states
-      for (const [id, container] of this.containers) {
-        if (container.status === 'warming') {
-          container.status = 'stopped';
-        }
-      }
+    const storedWarm = await this.ctx.storage.get<Set<string>>('warmContainers');
+    if (storedWarm) {
+      this.warmContainers = new Set(storedWarm);
     }
 
     const storedAssignments = await this.ctx.storage.get<Map<string, string>>('assignments');
@@ -70,27 +57,23 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       this.assignments = new Map(storedAssignments);
     }
 
-    const storedConfig = await this.ctx.storage.get<WarmPoolConfig>('config');
+    const storedConfig = await this.ctx.storage.get<PoolConfigInternal>('config');
     if (storedConfig) {
       this.config = { ...DEFAULT_CONFIG, ...storedConfig };
     }
 
     this.initialized = true;
 
-    // Schedule health check alarm
-    await this.scheduleHealthCheck();
+    // Schedule refresh alarm
+    await this.scheduleRefresh();
   }
 
   private async persist(): Promise<void> {
-    await this.ctx.storage.put('containers', this.containers);
+    await this.ctx.storage.put('warmContainers', this.warmContainers);
     await this.ctx.storage.put('assignments', this.assignments);
   }
 
-  private async persistConfig(): Promise<void> {
-    await this.ctx.storage.put('config', this.config);
-  }
-
-  private async scheduleHealthCheck(): Promise<void> {
+  private async scheduleRefresh(): Promise<void> {
     const alarm = await this.ctx.storage.getAlarm();
     if (!alarm) {
       await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
@@ -98,32 +81,13 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Alarm handler - performs health checks and replenishes pool
+   * Alarm handler - replenishes warm containers to reach warmTarget
    */
   async alarm(): Promise<void> {
     await this.init();
 
     try {
-      // Check for expired acquisitions
-      const now = Date.now();
-      for (const [containerId, container] of this.containers) {
-        if (
-          container.status === 'acquired' &&
-          container.acquiredAt &&
-          now - container.acquiredAt > this.config.acquireTimeout
-        ) {
-          console.log(`Container ${containerId} acquisition expired, releasing`);
-          this.releaseContainerById(containerId);
-        }
-      }
-
-      // Replenish warm containers
       await this.replenishPool();
-
-      // Health check warm containers
-      await this.healthCheckWarmContainers();
-
-      await this.persist();
     } catch (error) {
       console.error('Alarm handler error:', error);
     }
@@ -152,14 +116,12 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     switch (message.type) {
       case 'get':
         return this.handleGet(message.id);
-      case 'release':
-        return this.handleRelease(message.id);
+      case 'reportStopped':
+        return this.handleReportStopped(message.containerUUID);
       case 'stats':
         return this.handleStats();
-      case 'warmup':
-        return this.handleWarmup(message.count);
-      case 'shutdown':
-        return this.handleShutdown();
+      case 'shutdownPrewarmed':
+        return this.handleShutdownPrewarmed();
       default:
         throw new Error(`Unknown message type: ${(message as PoolMessage).type}`);
     }
@@ -170,181 +132,106 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
    * - If this ID already has an assigned container, return it
    * - Otherwise assign a warm container (or start a new one)
    */
-  private async handleGet(id: string): Promise<PoolResponse> {
-    // Check if this ID already has an assigned container
-    const existingContainerId = this.assignments.get(id);
-    if (existingContainerId) {
-      const container = this.containers.get(existingContainerId);
-      if (container && (container.status === 'acquired' || container.status === 'warm')) {
-        // Refresh the acquisition time
-        container.acquiredAt = Date.now();
-        container.status = 'acquired';
-        await this.persist();
-        return { type: 'container', containerId: existingContainerId };
-      }
-      // Container no longer valid, remove assignment
-      this.assignments.delete(id);
+  private async handleGet(userID: string): Promise<PoolResponse> {
+    // Check if this user ID already has an assigned container
+    const existingContainerUUID = this.assignments.get(userID);
+    if (existingContainerUUID) {
+      return { type: 'container', containerId: existingContainerUUID };
     }
 
-    // Try to find a warm container
-    for (const [containerId, container] of this.containers) {
-      if (container.status === 'warm') {
-        container.status = 'acquired';
-        container.acquiredAt = Date.now();
-        container.assignedTo = id;
-        this.assignments.set(id, containerId);
-        await this.persist();
-        return { type: 'container', containerId };
-      }
+    // Try to assign a warm container
+    if (this.warmContainers.size > 0) {
+      const containerUUID = this.warmContainers.values().next().value as string;
+      this.warmContainers.delete(containerUUID);
+      this.assignments.set(userID, containerUUID);
+      await this.persist();
+      return { type: 'container', containerId: containerUUID };
     }
 
-    // No warm container available, start a new one
-    const containerId = await this.warmupContainer();
-    if (containerId) {
-      const container = this.containers.get(containerId);
-      if (container) {
-        container.status = 'acquired';
-        container.acquiredAt = Date.now();
-        container.assignedTo = id;
-        this.assignments.set(id, containerId);
-        await this.persist();
-        return { type: 'container', containerId };
-      }
+    // No warm containers available - start a new one
+    const containerUUID = await this.startContainer();
+    if (containerUUID) {
+      this.assignments.set(userID, containerUUID);
+      await this.persist();
+      return { type: 'container', containerId: containerUUID };
     }
 
-    // Failed to start a container (system will error if over max_instances)
     throw new Error('Failed to start container');
   }
 
   /**
-   * Release a container by user-provided ID
+   * Called when a container stops - removes it from tracking
+   * This should be called from the container's onStop() method
    */
-  private async handleRelease(id: string): Promise<PoolResponse> {
-    const containerId = this.assignments.get(id);
-    if (containerId) {
-      this.releaseContainerById(containerId);
-      this.assignments.delete(id);
-      await this.persist();
+  private async handleReportStopped(containerUUID: string): Promise<PoolResponse> {
+    // Remove from warm containers if present
+    this.warmContainers.delete(containerUUID);
+
+    // Find and remove from assignments if present
+    for (const [userID, uuid] of this.assignments) {
+      if (uuid === containerUUID) {
+        this.assignments.delete(userID);
+        break;
+      }
     }
-    return { type: 'released' };
+
+    await this.persist();
+    return { type: 'stopped' };
   }
 
   /**
-   * Release a container by its internal container ID
+   * Called via RPC from container's onStop() method
    */
-  private releaseContainerById(containerId: string): void {
-    const container = this.containers.get(containerId);
-    if (!container) {
-      return;
-    }
-
-    container.status = 'warm';
-    container.acquiredAt = undefined;
-    container.assignedTo = undefined;
-
-    // Also clean up any assignments pointing to this container
-    for (const [id, cid] of this.assignments) {
-      if (cid === containerId) {
-        this.assignments.delete(id);
-      }
-    }
+  async reportStopped(containerUUID: string): Promise<void> {
+    await this.init();
+    await this.handleReportStopped(containerUUID);
   }
 
   private handleStats(): PoolResponse {
     const stats: PoolStats = {
-      warm: 0,
-      acquired: 0,
-      warming: 0,
-      total: this.containers.size,
+      warm: this.warmContainers.size,
+      assigned: this.assignments.size,
+      total: this.warmContainers.size + this.assignments.size,
       config: this.config,
     };
-
-    for (const container of this.containers.values()) {
-      switch (container.status) {
-        case 'warm':
-          stats.warm++;
-          break;
-        case 'acquired':
-          stats.acquired++;
-          break;
-        case 'warming':
-          stats.warming++;
-          break;
-      }
-    }
 
     return { type: 'stats', stats };
   }
 
-  private async handleWarmup(count?: number): Promise<PoolResponse> {
-    const target = count ?? this.config.warmTarget;
-    const currentWarm = this.countByStatus('warm');
-    const warmingCount = this.countByStatus('warming');
-    const needed = target - currentWarm - warmingCount;
-
-    for (let i = 0; i < needed; i++) {
-      await this.warmupContainer();
-    }
-
-    return { type: 'warming' };
-  }
-
-  private async handleShutdown(): Promise<PoolResponse> {
-    // Stop all containers
-    for (const [id, container] of this.containers) {
-      if (container.status !== 'stopped') {
-        try {
-          const stub = this.getContainerStub(id);
-          await (stub as unknown as ContainerRpc).stop();
-        } catch (error) {
-          console.error(`Failed to stop container ${id}:`, error);
-        }
-        container.status = 'stopped';
+  /**
+   * Shutdown only the pre-warmed (unassigned) containers
+   */
+  private async handleShutdownPrewarmed(): Promise<PoolResponse> {
+    for (const containerUUID of this.warmContainers) {
+      try {
+        const stub = this.getContainerStub(containerUUID);
+        await (stub as unknown as ContainerRpc).stop();
+      } catch (error) {
+        console.error(`Failed to stop container ${containerUUID}:`, error);
       }
     }
-    this.assignments.clear();
+    this.warmContainers.clear();
     await this.persist();
     return { type: 'shutdown' };
   }
 
-  private countByStatus(status: ContainerStatus): number {
-    let count = 0;
-    for (const container of this.containers.values()) {
-      if (container.status === status) count++;
-    }
-    return count;
-  }
-
   /**
-   * Warm up a new container and add it to the pool
+   * Start a new container and return its UUID
    */
-  private async warmupContainer(): Promise<string | null> {
-    const containerId = crypto.randomUUID();
-
-    const pooledContainer: PooledContainer = {
-      id: containerId,
-      status: 'warming',
-    };
-    this.containers.set(containerId, pooledContainer);
-    await this.persist();
+  private async startContainer(): Promise<string | null> {
+    const containerUUID = crypto.randomUUID();
 
     try {
-      const stub = this.getContainerStub(containerId);
+      const stub = this.getContainerStub(containerUUID);
       const rpc = stub as unknown as ContainerRpc;
 
       // Start the container and wait for ports (container class handles port config)
       await rpc.startAndWaitForPorts();
 
-      pooledContainer.status = 'warm';
-      pooledContainer.warmedAt = Date.now();
-      await this.persist();
-
-      console.log(`Container ${containerId} warmed up successfully`);
-      return containerId;
+      console.log(`Container ${containerUUID} started successfully`);
+      return containerUUID;
     } catch (error) {
-      console.error(`Failed to warm up container ${containerId}:`, error);
-      this.containers.delete(containerId);
-      await this.persist();
+      console.error(`Failed to start container ${containerUUID}:`, error);
       return null;
     }
   }
@@ -353,45 +240,22 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
    * Replenish the pool to maintain warmTarget containers ready
    */
   private async replenishPool(): Promise<void> {
-    const warmCount = this.countByStatus('warm');
-    const warmingCount = this.countByStatus('warming');
-    const needed = this.config.warmTarget - warmCount - warmingCount;
+    const needed = this.config.warmTarget - this.warmContainers.size;
 
     if (needed > 0) {
       console.log(`Replenishing pool: need ${needed} more warm containers`);
       for (let i = 0; i < needed; i++) {
-        await this.warmupContainer();
-      }
-    }
-  }
-
-  /**
-   * Health check warm containers
-   */
-  private async healthCheckWarmContainers(): Promise<void> {
-    for (const [id, container] of this.containers) {
-      if (container.status === 'warm') {
-        try {
-          const stub = this.getContainerStub(id);
-          const rpc = stub as unknown as ContainerRpc;
-          const status = await rpc.getStatus();
-
-          if (status !== 'running' && status !== 'healthy') {
-            console.log(`Container ${id} is no longer healthy (${status}), removing from pool`);
-            this.containers.delete(id);
-          } else {
-            container.lastHealthCheck = Date.now();
-          }
-        } catch (error) {
-          console.error(`Health check failed for container ${id}:`, error);
-          this.containers.delete(id);
+        const containerUUID = await this.startContainer();
+        if (containerUUID) {
+          this.warmContainers.add(containerUUID);
         }
       }
+      await this.persist();
     }
   }
 
-  private getContainerStub(containerId: string): DurableObjectStub {
-    const id = this.env.CONTAINER.idFromName(containerId);
+  private getContainerStub(containerUUID: string): DurableObjectStub {
+    const id = this.env.CONTAINER.idFromName(containerUUID);
     return this.env.CONTAINER.get(id);
   }
 }

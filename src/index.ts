@@ -1,17 +1,22 @@
 /**
  * cf-container-warm-pool
  * 
- * A warm pool manager for Cloudflare Containers. Pre-warm containers 
- * and acquire them on-demand with automatic lifecycle management.
+ * A warm pool manager for Cloudflare Containers and the Sandbox SDK.
+ * Pre-warm containers and acquire them on-demand with automatic lifecycle management.
  * 
  * @example
  * ```ts
- * import { createWarmPool, WarmPool } from 'cf-container-warm-pool';
+ * import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
  * import { Container } from '@cloudflare/containers';
  * 
- * // Define your container
- * export class MyContainer extends Container {
+ * // Define your container with required onStop handler
+ * export class MyContainer extends Container<Env> {
  *   defaultPort = 8080;
+ * 
+ *   async onStop() {
+ *     const pool = getWarmPool(this.env.WARM_POOL);
+ *     await pool.reportStopped(this.ctx.id.toString());
+ *   }
  * }
  * 
  * // Export the WarmPool DO
@@ -21,8 +26,7 @@
  * export default {
  *   async fetch(request: Request, env: Env) {
  *     const pool = createWarmPool(env.WARM_POOL, env.MY_CONTAINER, {
- *       minContainers: 3,
- *       ports: [8080],
+ *       warmTarget: 3,
  *     });
  * 
  *     const container = await pool.getContainer('session-123');
@@ -34,7 +38,7 @@
 
 // Core pool management
 export { WarmPool } from './pool.js';
-export { createWarmPool } from './client.js';
+export { createWarmPool, getWarmPool } from './client.js';
 
 // Types
 export type {
@@ -43,8 +47,5 @@ export type {
 
 export type {
   WarmPoolConfig,
-  AcquireOptions,
   PoolStats,
-  ContainerStatus,
-  PooledContainer,
 } from './types.js';
