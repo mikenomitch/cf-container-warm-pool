@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "warm-pool-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-13",
+
+  // Container configuration
+  "containers": [
+    {
+      "class_name": "MyContainer",
+      "image": "./Dockerfile",
+      "max_instances": 10,
+      "name": "my-container"
+    }
+  ],
+
+  // Durable Object bindings
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MyContainer",
+        "name": "CONTAINER"
+      },
+      {
+        "class_name": "WarmPool",
+        "name": "WARM_POOL"
+      }
+    ]
+  },
+
+  // Required migrations for SQLite storage
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MyContainer", "WarmPool"]
+    }
+  ]
+}

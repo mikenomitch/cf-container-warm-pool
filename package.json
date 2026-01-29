@@ -1,0 +1,41 @@
+{
+  "name": "cf-container-warm-pool",
+  "version": "0.1.0",
+  "description": "A warm pool manager for Cloudflare Containers - pre-warm containers and acquire them on-demand",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "cloudflare",
+    "containers",
+    "workers",
+    "warm-pool",
+    "durable-objects"
+  ],
+  "author": "",
+  "license": "MIT",
+  "peerDependencies": {
+    "@cloudflare/containers": ">=0.0.1",
+    "@cloudflare/workers-types": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/containers": "^0.0.14",
+    "@cloudflare/workers-types": "^4.20250121.0",
+    "typescript": "^5.7.3"
+  }
+}
