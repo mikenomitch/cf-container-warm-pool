@@ -1,6 +1,6 @@
 // @ts-ignore - @cloudflare/containers has broken type exports, but wrangler handles it correctly
-import { Container } from '@cloudflare/containers';
-import { createWarmPool, getWarmPool, WarmPool } from 'cf-container-warm-pool';
+import { Container } from "@cloudflare/containers";
+import { createWarmPool, getWarmPool, WarmPool } from "cf-container-warm-pool";
 
 // Environment bindings
 export interface Env {
@@ -17,10 +17,10 @@ export class MyContainer extends Container<Env> {
   defaultPort = 8080;
 
   // How long before an idle container is stopped
-  sleepAfter = '10m';
+  sleepAfter = "30s";
 
   onStart() {
-    console.log('Container started');
+    console.log("Container started");
   }
 
   /**
@@ -43,7 +43,11 @@ export { WarmPool };
  * Main Worker entry point
  */
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     // Create the warm pool client with configuration
@@ -53,24 +57,42 @@ export default {
     });
 
     // Route: GET /stats - Show pool statistics
-    if (url.pathname === '/stats') {
+    if (url.pathname === "/stats") {
       const stats = await pool.stats();
       return Response.json(stats, {
-        headers: { 'Content-Type': 'application/json' },
+        headers: { "Content-Type": "application/json" },
       });
     }
 
     // Route: POST /shutdown-prewarmed - Stop all pre-warmed containers
-    if (url.pathname === '/shutdown-prewarmed' && request.method === 'POST') {
+    if (url.pathname === "/shutdown-prewarmed" && request.method === "POST") {
       await pool.shutdownPrewarmed();
-      return new Response('Pre-warmed containers shutdown complete', { status: 200 });
+      return new Response("Pre-warmed containers shutdown complete", {
+        status: 200,
+      });
     }
 
-    // Get a container by session ID
+    // Route: /instance/:id/* - Route to a specific container by ID
+    const instanceMatch = url.pathname.match(/^\/instance\/([^/]+)(\/.*)?$/);
+    if (instanceMatch) {
+      const instanceId = instanceMatch[1];
+      const remainingPath = instanceMatch[2] || "/";
+
+      const container = await pool.getContainer(instanceId);
+
+      // Rewrite the URL to remove /instance/:id prefix
+      const containerUrl = new URL(request.url);
+      containerUrl.pathname = remainingPath;
+
+      const containerRequest = new Request(containerUrl, request);
+      return container.fetch(containerRequest);
+    }
+
+    // Default: Get a container by session ID header
     // Same ID will always return the same container (1:1 mapping)
-    const sessionId = request.headers.get('x-session-id') || 'default';
+    const sessionId = request.headers.get("x-session-id") || "default";
     const container = await pool.getContainer(sessionId);
-    
+
     // Forward the request to the container
     return container.fetch(request);
   },

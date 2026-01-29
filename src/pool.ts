@@ -166,8 +166,8 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       // This handles cases where onStop() failed to report
       await this.checkContainerHealth();
 
-      // Then replenish to maintain warmTarget
-      await this.replenishPool();
+      // Then adjust pool size to maintain warmTarget
+      await this.adjustPool();
     } catch (error) {
       console.error('Alarm handler error:', error);
     }
@@ -325,18 +325,37 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Replenish the pool to maintain warmTarget containers ready
+   * Adjust the pool to maintain warmTarget containers ready
+   * - Starts new containers if below target
+   * - Stops excess containers if above target
    */
-  private async replenishPool(): Promise<void> {
-    const needed = this.config.warmTarget - this.warmContainers.size;
+  private async adjustPool(): Promise<void> {
+    const diff = this.config.warmTarget - this.warmContainers.size;
 
-    if (needed > 0) {
-      console.log(`Replenishing pool: need ${needed} more warm containers`);
-      for (let i = 0; i < needed; i++) {
+    if (diff > 0) {
+      // Need more warm containers - start them
+      console.log(`Scaling up pool: need ${diff} more warm containers`);
+      for (let i = 0; i < diff; i++) {
         const containerUUID = await this.startContainer();
         if (containerUUID) {
           this.warmContainers.add(containerUUID);
         }
+      }
+      await this.persist();
+    } else if (diff < 0) {
+      // Have too many warm containers - stop the excess
+      const excess = -diff;
+      console.log(`Scaling down pool: stopping ${excess} excess warm containers`);
+      
+      const containersToStop = [...this.warmContainers].slice(0, excess);
+      for (const containerUUID of containersToStop) {
+        try {
+          const stub = this.getContainerStub(containerUUID);
+          await (stub as unknown as ContainerRpc).stop();
+        } catch (error) {
+          console.error(`Failed to stop container ${containerUUID}:`, error);
+        }
+        this.warmContainers.delete(containerUUID);
       }
       await this.persist();
     }
