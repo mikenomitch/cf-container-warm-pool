@@ -24,16 +24,11 @@ export interface PooledContainer {
  */
 export interface WarmPoolConfig {
   /**
-   * Number of containers to keep warm
+   * Target number of warm (unacquired) containers to maintain.
+   * The pool will start new containers to maintain this many ready for immediate use.
    * @default 1
    */
-  minContainers?: number;
-
-  /**
-   * Maximum number of containers (including acquired)
-   * @default 10
-   */
-  maxContainers?: number;
+  warmTarget?: number;
 
   /**
    * How long a container can be acquired before auto-release (ms)
@@ -42,21 +37,10 @@ export interface WarmPoolConfig {
   acquireTimeout?: number;
 
   /**
-   * How often to check pool health and replenish (ms)
+   * How often to refresh the pool - checks for expired acquisitions and replenishes warm containers (ms)
    * @default 30000 (30 seconds)
    */
-  healthCheckInterval?: number;
-
-  /**
-   * Ports to wait for during container warmup
-   */
-  ports?: number[];
-
-  /**
-   * Timeout for container startup (ms)
-   * @default 30000 (30 seconds)
-   */
-  startupTimeout?: number;
+  refreshInterval?: number;
 }
 
 /**

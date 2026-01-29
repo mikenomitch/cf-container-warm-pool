@@ -9,23 +9,16 @@ import type {
 } from './types.js';
 
 const DEFAULT_CONFIG: Required<WarmPoolConfig> = {
-  minContainers: 1,
-  maxContainers: 10,
+  warmTarget: 1,
   acquireTimeout: 5 * 60 * 1000, // 5 minutes
-  healthCheckInterval: 30 * 1000, // 30 seconds
-  ports: [],
-  startupTimeout: 30 * 1000, // 30 seconds
+  refreshInterval: 30 * 1000, // 30 seconds
 };
 
 /**
  * Interface for container methods we call via RPC
  */
 interface ContainerRpc {
-  start(options?: unknown): Promise<void>;
-  startAndWaitForPorts(options: {
-    ports?: number[];
-    cancellationOptions?: { portReadyTimeoutMS?: number };
-  }): Promise<void>;
+  startAndWaitForPorts(): Promise<void>;
   stop(signal?: string): Promise<void>;
   getStatus(): Promise<string>;
 }
@@ -100,7 +93,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   private async scheduleHealthCheck(): Promise<void> {
     const alarm = await this.ctx.storage.getAlarm();
     if (!alarm) {
-      await this.ctx.storage.setAlarm(Date.now() + this.config.healthCheckInterval);
+      await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
     }
   }
 
@@ -136,7 +129,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     }
 
     // Schedule next alarm
-    await this.ctx.storage.setAlarm(Date.now() + this.config.healthCheckInterval);
+    await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
   }
 
   /**
@@ -205,25 +198,22 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       }
     }
 
-    // No warm container available, try to start a new one if under limit
-    const total = this.containers.size;
-    if (total < this.config.maxContainers) {
-      const containerId = await this.warmupContainer();
-      if (containerId) {
-        const container = this.containers.get(containerId);
-        if (container) {
-          container.status = 'acquired';
-          container.acquiredAt = Date.now();
-          container.assignedTo = id;
-          this.assignments.set(id, containerId);
-          await this.persist();
-          return { type: 'container', containerId };
-        }
+    // No warm container available, start a new one
+    const containerId = await this.warmupContainer();
+    if (containerId) {
+      const container = this.containers.get(containerId);
+      if (container) {
+        container.status = 'acquired';
+        container.acquiredAt = Date.now();
+        container.assignedTo = id;
+        this.assignments.set(id, containerId);
+        await this.persist();
+        return { type: 'container', containerId };
       }
     }
 
-    // All containers are busy and at max capacity
-    throw new Error('No containers available and pool is at capacity');
+    // Failed to start a container (system will error if over max_instances)
+    throw new Error('Failed to start container');
   }
 
   /**
@@ -287,9 +277,10 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   private async handleWarmup(count?: number): Promise<PoolResponse> {
-    const toWarm = count ?? this.config.minContainers;
+    const target = count ?? this.config.warmTarget;
     const currentWarm = this.countByStatus('warm');
-    const needed = Math.min(toWarm - currentWarm, this.config.maxContainers - this.containers.size);
+    const warmingCount = this.countByStatus('warming');
+    const needed = target - currentWarm - warmingCount;
 
     for (let i = 0; i < needed; i++) {
       await this.warmupContainer();
@@ -341,19 +332,8 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       const stub = this.getContainerStub(containerId);
       const rpc = stub as unknown as ContainerRpc;
 
-      // Start the container and wait for ports
-      if (this.config.ports.length > 0) {
-        await rpc.startAndWaitForPorts({
-          ports: this.config.ports,
-          cancellationOptions: {
-            portReadyTimeoutMS: this.config.startupTimeout,
-          },
-        });
-      } else {
-        await rpc.start();
-        // Give it a moment to be ready
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      // Start the container and wait for ports (container class handles port config)
+      await rpc.startAndWaitForPorts();
 
       pooledContainer.status = 'warm';
       pooledContainer.warmedAt = Date.now();
@@ -370,17 +350,12 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Replenish the pool to maintain minContainers warm
+   * Replenish the pool to maintain warmTarget containers ready
    */
   private async replenishPool(): Promise<void> {
     const warmCount = this.countByStatus('warm');
     const warmingCount = this.countByStatus('warming');
-    const total = this.containers.size;
-
-    const needed = Math.min(
-      this.config.minContainers - warmCount - warmingCount,
-      this.config.maxContainers - total
-    );
+    const needed = this.config.warmTarget - warmCount - warmingCount;
 
     if (needed > 0) {
       console.log(`Replenishing pool: need ${needed} more warm containers`);

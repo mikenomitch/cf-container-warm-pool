@@ -17,10 +17,12 @@
   // Durable Object bindings
   "durable_objects": {
     "bindings": [
+      // Your existing container binding - use whatever name you already have
       {
         "class_name": "MyContainer",
         "name": "CONTAINER"
       },
+      // Add this new binding for the warm pool
       {
         "class_name": "WarmPool",
         "name": "WARM_POOL"
@@ -30,9 +32,15 @@
 
   // Required migrations for SQLite storage
   "migrations": [
+    // Your existing container migration - skip if you already have this
     {
       "tag": "v1",
-      "new_sqlite_classes": ["MyContainer", "WarmPool"]
+      "new_sqlite_classes": ["MyContainer"]
+    },
+    // Add this new migration for the warm pool
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["WarmPool"]
     }
   ]
 }

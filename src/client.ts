@@ -14,8 +14,7 @@ import type {
  * @example
  * ```ts
  * const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
- *   minContainers: 3,
- *   ports: [8080],
+ *   warmTarget: 3,
  * });
  * 
  * // Get a container by ID (will use warm container or start new one)
@@ -54,14 +53,14 @@ export interface WarmPoolClient {
   /**
    * Manually trigger warmup of containers
    * 
-   * @param count - Number of containers to warm (defaults to minContainers)
+   * @param count - Number of containers to warm (defaults to warmTarget)
    */
   warmup(count?: number): Promise<void>;
 
   /**
    * Shutdown all containers in the pool
    */
-  shutdown(): Promise<void>;
+  shutdownAll(): Promise<void>;
 }
 
 /**
@@ -78,9 +77,7 @@ export interface WarmPoolClient {
  * export default {
  *   async fetch(request: Request, env: Env) {
  *     const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
- *       minContainers: 3,
- *       maxContainers: 10,
- *       ports: [8080],
+ *       warmTarget: 3,
  *     });
  * 
  *     // Get container by session ID
@@ -104,7 +101,7 @@ export function createWarmPool(
   let configured = false;
   const ensureConfigured = async () => {
     if (!configured && config) {
-      await sendMessage(poolStub, { type: 'warmup', count: config.minContainers });
+      await sendMessage(poolStub, { type: 'warmup', count: config.warmTarget });
       configured = true;
     }
   };
@@ -173,7 +170,7 @@ export function createWarmPool(
       }
     },
 
-    async shutdown(): Promise<void> {
+    async shutdownAll(): Promise<void> {
       const response = await sendMessage(poolStub, { type: 'shutdown' });
 
       if (response.type === 'error') {

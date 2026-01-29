@@ -41,12 +41,8 @@ export default {
 
     // Create the warm pool client with configuration
     const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
-      // Keep 3 containers warm and ready
-      minContainers: 3,
-      // Allow up to 10 concurrent containers
-      maxContainers: 10,
-      // Wait for this port during warmup
-      ports: [8080],
+      // Target number of warm (unacquired) containers to maintain
+      warmTarget: 3,
       // Release containers after 5 minutes if not explicitly released
       acquireTimeout: 5 * 60 * 1000,
     });
@@ -67,7 +63,7 @@ export default {
 
     // Route: POST /shutdown - Stop all containers
     if (url.pathname === '/shutdown' && request.method === 'POST') {
-      await pool.shutdown();
+      await pool.shutdownAll();
       return new Response('Shutdown complete', { status: 200 });
     }
 
