@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "A warm pool manager for Cloudflare Containers - pre-warm containers and acquire them on-demand",
   "type": "module",
+  "private": false,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -11,14 +12,14 @@
       "import": "./dist/index.js"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "keywords": [
     "cloudflare",
@@ -33,9 +34,12 @@
     "@cloudflare/containers": ">=0.0.1",
     "@cloudflare/workers-types": ">=4.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
-    "@cloudflare/containers": "^0.0.14",
-    "@cloudflare/workers-types": "^4.20250121.0",
-    "typescript": "^5.7.3"
+    "@cloudflare/containers": "^0.1.0",
+    "@cloudflare/workers-types": "^4.20260212.0",
+    "typescript": "^5.9.3"
   }
 }

@@ -6,6 +6,7 @@ import { createWarmPool, getWarmPool, WarmPool } from "cf-container-warm-pool";
 export interface Env {
   CONTAINER: DurableObjectNamespace;
   WARM_POOL: DurableObjectNamespace<WarmPool>;
+  CONTAINER_ID_CACHE: KVNamespace;
 }
 
 /**
@@ -54,6 +55,8 @@ export default {
     const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
       // Target number of warm (unassigned) containers to maintain
       warmTarget: 3,
+      // KV cache for fast container lookup by session/container ID
+      idCache: env.CONTAINER_ID_CACHE,
     });
 
     // Route: GET /stats - Show pool statistics

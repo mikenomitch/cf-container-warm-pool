@@ -13,8 +13,8 @@
     "cf-container-warm-pool": "file:.."
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250121.0",
-    "typescript": "^5.7.3",
-    "wrangler": "^4.0.0"
+    "@cloudflare/workers-types": "^4.20260212.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.65.0"
   }
 }

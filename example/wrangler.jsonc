@@ -1,46 +1,57 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "warm-pool-example",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-01-13",
-
-  // Container configuration
-  "containers": [
-    {
-      "class_name": "MyContainer",
-      "image": "./Dockerfile",
-      "max_instances": 10,
-      "name": "my-container"
-    }
-  ],
-
-  // Durable Object bindings
-  "durable_objects": {
-    "bindings": [
-      // Your existing container binding - use whatever name you already have
-      {
-        "class_name": "MyContainer",
-        "name": "CONTAINER"
-      },
-      // Add this new binding for the warm pool
-      {
-        "class_name": "WarmPool",
-        "name": "WARM_POOL"
-      }
-    ]
-  },
-
-  // Required migrations for SQLite storage
-  "migrations": [
-    // Your existing container migration - skip if you already have this
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["MyContainer"]
-    },
-    // Add this new migration for the warm pool
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["WarmPool"]
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "warm-pool-example",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-01-13",
+	"observability": {
+		"enabled": true,
+	},
+	// Container configuration
+	"containers": [
+		{
+			"class_name": "MyContainer",
+			"image": "./Dockerfile",
+			"max_instances": 10,
+			"name": "my-container",
+		},
+	],
+	// Durable Object bindings
+	"durable_objects": {
+		"bindings": [
+			// Your existing container binding - use whatever name you already have
+			{
+				"class_name": "MyContainer",
+				"name": "CONTAINER",
+			},
+			// Add this new binding for the warm pool
+			{
+				"class_name": "WarmPool",
+				"name": "WARM_POOL",
+			},
+		],
+	},
+	// Required migrations for SQLite storage
+	"migrations": [
+		// Your existing container migration - skip if you already have this
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"MyContainer"
+			],
+		},
+		// Add this new migration for the warm pool
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"WarmPool"
+			],
+		},
+	],
+	// KV namespace for idCache in the example
+	"kv_namespaces": [
+		{
+			"binding": "CONTAINER_ID_CACHE",
+			"id": "c43e1e89a3c44c66b37b68981c34ee7a",
+		},
+	],
 }

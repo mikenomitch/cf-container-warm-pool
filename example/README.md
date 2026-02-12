@@ -8,6 +8,17 @@ A complete example demonstrating the warm pool pattern with Cloudflare Container
 npm install
 ```
 
+### Configure KV cache (required for this example)
+
+Create a KV namespace for `CONTAINER_ID_CACHE` and update `wrangler.jsonc`:
+
+```bash
+wrangler kv namespace create CONTAINER_ID_CACHE
+wrangler kv namespace create --preview CONTAINER_ID_CACHE
+```
+
+Replace `<kv-id>` and `<kv-preview-id>` in `example/wrangler.jsonc` with the returned IDs.
+
 ## Development
 
 ```bash

@@ -136,10 +136,28 @@ export function createWarmPool(
     },
 
     async stats(): Promise<PoolStats> {
-      // Send config first to ensure it's always up-to-date (handles redeployments)
-      await poolStub.configure(poolConfig);
-      
-      return poolStub.getStats();
+      // Stats should remain readable even if config RPCs fail during
+      // version/config mismatches.
+      try {
+        await poolStub.configure(poolConfig);
+      } catch (_error) {
+        // Keep backwards-compatible behavior: prefer returning stats even if
+        // configuration couldn't be applied.
+      }
+
+      const doClient = poolStub as unknown as {
+        getStats: () => Promise<PoolStats>;
+        stats?: () => Promise<PoolStats>;
+      };
+
+      try {
+        return await doClient.getStats();
+      } catch (_error) {
+        if (typeof doClient.stats === 'function') {
+          return doClient.stats();
+        }
+        throw _error;
+      }
     },
 
     async shutdownPrewarmed(): Promise<void> {
