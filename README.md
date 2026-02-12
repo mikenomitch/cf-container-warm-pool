@@ -95,6 +95,15 @@ Configure your `wrangler.jsonc`:
     ]
   },
 
+  "kv_namespaces": [
+    // Shared cache for optional idCache
+    {
+      "binding": "CONTAINER_ID_CACHE",
+      "id": "<kv-id>",
+      "preview_id": "<kv-preview-id>"
+    }
+  ],
+
   "migrations": [
     // Your existing container migration - skip if you already have this
     { "tag": "v1", "new_sqlite_classes": ["MyContainer"] },
@@ -255,12 +264,14 @@ export { WarmPool };
 export interface Env {
   SANDBOX: DurableObjectNamespace;
   WARM_POOL: DurableObjectNamespace;
+  CONTAINER_ID_CACHE: KVNamespace;
 }
 
 export default {
   async fetch(request: Request, env: Env) {
     const pool = createWarmPool(env.WARM_POOL, env.SANDBOX, {
       warmTarget: 3,
+      idCache: env.CONTAINER_ID_CACHE,
     });
 
     // Get a pre-warmed sandbox by session ID
@@ -291,6 +302,13 @@ Your `wrangler.jsonc` for Sandbox:
       { "class_name": "WarmPool", "name": "WARM_POOL" }
     ]
   },
+  "kv_namespaces": [
+    {
+      "binding": "CONTAINER_ID_CACHE",
+      "id": "<kv-id>",
+      "preview_id": "<kv-preview-id>"
+    }
+  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MySandbox"] },
     { "tag": "v2", "new_sqlite_classes": ["WarmPool"] }
