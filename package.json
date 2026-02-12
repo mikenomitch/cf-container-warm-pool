@@ -1,6 +1,6 @@
 {
   "name": "cf-container-warm-pool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A warm pool manager for Cloudflare Containers - pre-warm containers and acquire them on-demand",
   "type": "module",
   "private": false,
@@ -12,7 +12,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
