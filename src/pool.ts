@@ -147,15 +147,18 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   async shutdownPrewarmed(): Promise<void> {
     await this.init();
 
-    for (const containerUUID of this.warmContainers) {
+    const containersToStop = [...this.warmContainers];
+
+    for (const containerUUID of containersToStop) {
       try {
         const stub = this.getContainerStub(containerUUID);
         await (stub as unknown as ContainerRpc).stop();
+        this.warmContainers.delete(containerUUID);
       } catch (error) {
         console.error(`Failed to stop container ${containerUUID}:`, error);
       }
     }
-    this.warmContainers.clear();
+    
     await this.persist();
   }
 
@@ -373,13 +376,19 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       console.log(`Scaling down pool: stopping ${excess} excess warm containers`);
       
       const containersToStop = [...this.warmContainers].slice(0, excess);
+      const stoppedContainers: string[] = [];
+
       for (const containerUUID of containersToStop) {
         try {
           const stub = this.getContainerStub(containerUUID);
           await (stub as unknown as ContainerRpc).stop();
+          stoppedContainers.push(containerUUID);
         } catch (error) {
           console.error(`Failed to stop container ${containerUUID}:`, error);
         }
+      }
+
+      for (const containerUUID of stoppedContainers) {
         this.warmContainers.delete(containerUUID);
       }
       await this.persist();

@@ -124,7 +124,11 @@ export function createWarmPool(
       }
 
       // Send config first to ensure it's always up-to-date (handles redeployments)
-      await poolStub.configure(poolConfig);
+      try {
+        await poolStub.configure(poolConfig);
+      } catch (_error) {
+        // Keep backward-compatible behavior: continue even if config RPC fails.
+      }
       
       const containerUUID = await poolStub.getContainer(id);
       if (kvStore) {
@@ -162,7 +166,11 @@ export function createWarmPool(
 
     async shutdownPrewarmed(): Promise<void> {
       // Send config first to ensure it's always up-to-date (handles redeployments)
-      await poolStub.configure(poolConfig);
+      try {
+        await poolStub.configure(poolConfig);
+      } catch (_error) {
+        // Keep backward-compatible behavior: continue even if config RPC fails.
+      }
       
       await poolStub.shutdownPrewarmed();
     },
