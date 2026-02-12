@@ -58,7 +58,9 @@ export interface WarmPoolClient {
  * 
  * @param poolNamespace - The WarmPool Durable Object namespace binding
  * @param containerNamespace - The Container Durable Object namespace binding
- * @param config - Pool configuration options (including optional `kvNamespace` for lookup cache)
+ * @param config - Pool configuration options. `idCache` is recommended for production
+ *                 to avoid extra warm-pool DO lookup hops on repeat IDs.
+ *                 (including optional `idCache` for lookup cache)
  * @returns A WarmPoolClient for acquiring and managing containers
  * 
  * @example
@@ -89,7 +91,7 @@ export function createWarmPool(
   const getCacheKey = (id: string) => `${poolName}:${id}`;
 
   // Extract pool config (excluding poolName which is client-side only)
-  const { poolName: _, kvNamespace: kvStore, ...poolConfig } = config ?? {};
+  const { poolName: _, idCache: kvStore, ...poolConfig } = config ?? {};
 
   const resolveFromCache = async (id: string): Promise<DurableObjectStub | null> => {
     if (!kvStore) return null;

@@ -27,13 +27,13 @@ export interface WarmPoolConfig {
    * When present, `getContainer()` will read from KV first and only fall back to the
    * warm pool Durable Object on a miss.
    */
-  kvNamespace?: KVNamespace;
+  idCache?: KVNamespace;
 }
 
 /**
  * Internal pool config (excludes poolName which is only used client-side)
  */
-export type PoolConfigInternal = Omit<WarmPoolConfig, 'poolName' | 'kvNamespace'>;
+export type PoolConfigInternal = Omit<WarmPoolConfig, 'poolName' | 'idCache'>;
 
 /**
  * Stats about the warm pool
@@ -48,4 +48,3 @@ export interface PoolStats {
   /** Current pool configuration */
   config: Required<PoolConfigInternal>;
 }
-
