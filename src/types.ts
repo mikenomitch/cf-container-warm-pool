@@ -21,12 +21,19 @@ export interface WarmPoolConfig {
    * @default 'global-pool'
    */
   poolName?: string;
+
+  /**
+   * Optional KV namespace used to cache `userId -> containerId` lookups.
+   * When present, `getContainer()` will read from KV first and only fall back to the
+   * warm pool Durable Object on a miss.
+   */
+  kvNamespace?: KVNamespace;
 }
 
 /**
  * Internal pool config (excludes poolName which is only used client-side)
  */
-export type PoolConfigInternal = Omit<WarmPoolConfig, 'poolName'>;
+export type PoolConfigInternal = Omit<WarmPoolConfig, 'poolName' | 'kvNamespace'>;
 
 /**
  * Stats about the warm pool
@@ -41,5 +48,4 @@ export interface PoolStats {
   /** Current pool configuration */
   config: Required<PoolConfigInternal>;
 }
-
 

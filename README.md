@@ -117,8 +117,47 @@ Creates a warm pool client.
 | `warmTarget` | number | 5 | Target number of warm (unassigned) containers to maintain ready for immediate use |
 | `refreshInterval` | number | 10000 | How often to check health and replenish warm containers (ms) |
 | `poolName` | string | 'global-pool' | Name of the pool instance. Use this if you have multiple container types and need separate warm pools. |
+| `kvNamespace` | KVNamespace | undefined | Optional KV namespace for cached `sessionId -> containerId` lookups. If provided, `getContainer()` checks KV first and falls back to the DO on cache miss or invalid mapping. |
 
 **Important:** Your container's `sleepAfter` must be longer than `refreshInterval`. The pool renews the activity timeout on warm containers each refresh cycle to keep them alive. If `sleepAfter` is shorter than `refreshInterval`, containers may stop before the next refresh.
+
+#### `kvNamespace` (optional)
+
+You can pass `kvNamespace` to use KV as an optional container-id lookup cache and bypass the warm-pool DO for fast path routing:
+
+- `kvNamespace` stores `poolName + ':' + id` -> `containerId` mappings.
+- `getContainer(id)` checks KV first.
+- On KV hit, the client validates that container state is healthy/running before use.
+- If the cached container is missing or not running, the cache key is deleted, it falls back to `WARM_POOL.getContainer(id)`, then writes the resolved `containerId` back to KV.
+- This gives fast-path routing without routing requests to wrong/dead instances.
+
+Example:
+
+```ts
+export interface Env {
+  CONTAINER: DurableObjectNamespace;
+  WARM_POOL: DurableObjectNamespace<WarmPool>;
+  CONTAINER_ID_CACHE: KVNamespace;
+}
+
+const pool = createWarmPool(env.WARM_POOL, env.CONTAINER, {
+  poolName: "global-pool",
+  kvNamespace: env.CONTAINER_ID_CACHE,
+  warmTarget: 3,
+});
+```
+
+`wrangler.jsonc` binding:
+
+```jsonc
+"kv_namespaces": [
+  {
+    "binding": "CONTAINER_ID_CACHE",
+    "id": "<kv-id>",
+    "preview_id": "<kv-preview-id>"
+  }
+]
+```
 
 ### `getWarmPool(poolNamespace, poolName?)`
 

@@ -5,6 +5,14 @@ import type {
 } from './types.js';
 import type { WarmPool } from './pool.js';
 
+interface ContainerState {
+  status: 'running' | 'stopping' | 'stopped' | 'healthy' | 'stopped_with_code';
+}
+
+interface ContainerWithState {
+  getState(): Promise<ContainerState>;
+}
+
 /**
  * Client for interacting with a WarmPool Durable Object
  * 
@@ -50,7 +58,7 @@ export interface WarmPoolClient {
  * 
  * @param poolNamespace - The WarmPool Durable Object namespace binding
  * @param containerNamespace - The Container Durable Object namespace binding
- * @param config - Pool configuration options
+ * @param config - Pool configuration options (including optional `kvNamespace` for lookup cache)
  * @returns A WarmPoolClient for acquiring and managing containers
  * 
  * @example
@@ -78,16 +86,49 @@ export function createWarmPool(
   const poolName = config?.poolName ?? 'global-pool';
   const poolId = poolNamespace.idFromName(poolName);
   const poolStub = poolNamespace.get(poolId);
+  const getCacheKey = (id: string) => `${poolName}:${id}`;
 
   // Extract pool config (excluding poolName which is client-side only)
-  const { poolName: _, ...poolConfig } = config ?? {};
+  const { poolName: _, kvNamespace: kvStore, ...poolConfig } = config ?? {};
+
+  const resolveFromCache = async (id: string): Promise<DurableObjectStub | null> => {
+    if (!kvStore) return null;
+
+    const mappedContainerId = await kvStore.get<string>(getCacheKey(id));
+    if (!mappedContainerId) return null;
+
+    const cachedContainerId = containerNamespace.idFromName(mappedContainerId);
+    const container = containerNamespace.get(cachedContainerId);
+    const containerWithState = container as unknown as ContainerWithState;
+
+    try {
+      const state = await containerWithState.getState();
+      if (state.status === 'running' || state.status === 'healthy') {
+        return container;
+      }
+    } catch (_error) {
+      // Ignore and fall back to warm-pool
+    }
+
+    await kvStore.delete(getCacheKey(id));
+    return null;
+  };
 
   return {
     async getContainer(id: string): Promise<DurableObjectStub> {
+      const cachedContainer = await resolveFromCache(id);
+      if (cachedContainer) {
+        return cachedContainer;
+      }
+
       // Send config first to ensure it's always up-to-date (handles redeployments)
       await poolStub.configure(poolConfig);
       
       const containerUUID = await poolStub.getContainer(id);
+      if (kvStore) {
+        await kvStore.put(getCacheKey(id), containerUUID);
+      }
+
       const doId = containerNamespace.idFromName(containerUUID);
       return containerNamespace.get(doId);
     },
