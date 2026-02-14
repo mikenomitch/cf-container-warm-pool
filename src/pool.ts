@@ -46,16 +46,21 @@ interface ContainerWithState {
  */
 export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONTAINER: DurableObjectNamespace }> extends DurableObject<Env> {
   private config: Required<PoolConfigInternal> = DEFAULT_CONFIG;
-  
+
   /** Container UUIDs that are warm and available for assignment */
   private warmContainers: Set<string> = new Set();
-  
+
   /** Maps user-provided IDs to container UUIDs (1:1, no sharing) */
   private assignments: Map<string, string> = new Map();
-  
-  /** Container UUIDs currently being started - don't mark these as stopped during health check */
+
+  /** Containers currently starting — excluded from health checks to avoid false positives */
   private startingContainers: Set<string> = new Set();
-  
+
+  /** Inferred max_instances limit learned from Cloudflare errors, or `null` if unknown */
+  private knownMaxInstances: number | null = null;
+
+  private capacityExhausted = false;
+
   private initialized = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -74,20 +79,16 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   async getContainer(userID: string): Promise<string> {
     await this.init();
 
-    // Check if this user ID already has an assigned container
     const existingContainerUUID = this.assignments.get(userID);
     if (existingContainerUUID) {
-      // Verify the container is still running
       const running = await this.isContainerRunning(existingContainerUUID);
       if (running) {
         return existingContainerUUID;
       }
-      // Container stopped - remove stale assignment and assign a new one
       this.assignments.delete(userID);
       await this.persist();
     }
 
-    // Try to assign a warm container
     if (this.warmContainers.size > 0) {
       const containerUUID = this.warmContainers.values().next().value as string;
       this.warmContainers.delete(containerUUID);
@@ -96,7 +97,14 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       return containerUUID;
     }
 
-    // No warm containers available - start a new one
+    if (this.remainingCapacity() <= 0) {
+      const total = this.warmContainers.size + this.assignments.size;
+      throw new Error(
+        `Cannot start container: instance limit reached (${total}/${this.knownMaxInstances}). ` +
+        `All container slots are in use. Wait for existing containers to stop.`
+      );
+    }
+
     const containerUUID = await this.startContainer();
     if (containerUUID) {
       this.assignments.set(userID, containerUUID);
@@ -104,12 +112,20 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       return containerUUID;
     }
 
+    if (this.capacityExhausted) {
+      const total = this.warmContainers.size + this.assignments.size;
+      throw new Error(
+        `Cannot start container: instance limit reached (${total}/${this.knownMaxInstances}). ` +
+        `All container slots are in use. Wait for existing containers to stop.`
+      );
+    }
+
     throw new Error('Failed to start container');
   }
 
   /**
-   * Report that a container has stopped - removes it from tracking
-   * Call this from your container's onStop() method
+   * Report that a container has stopped - removes it from tracking.
+   * Call this from your container's onStop() method.
    */
   async reportStopped(containerUUID: string): Promise<void> {
     await this.init();
@@ -128,6 +144,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       assigned: this.assignments.size,
       total: this.warmContainers.size + this.assignments.size,
       config: this.config,
+      maxInstances: this.knownMaxInstances,
     };
   }
 
@@ -141,8 +158,8 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Shutdown all pre-warmed (unassigned) containers
-   * Does not affect containers that are assigned to user IDs
+   * Shutdown all pre-warmed (unassigned) containers.
+   * Does not affect containers that are assigned to user IDs.
    */
   async shutdownPrewarmed(): Promise<void> {
     await this.init();
@@ -158,7 +175,7 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
         console.error(`Failed to stop container ${containerUUID}:`, error);
       }
     }
-    
+
     await this.persist();
   }
 
@@ -172,21 +189,19 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   async alarm(): Promise<void> {
     await this.init();
 
+    this.capacityExhausted = false;
+
     try {
-      // First, check health of all tracked containers and remove any that stopped
-      // This handles cases where onStop() failed to report
+      // Health-check all tracked containers and remove any that stopped.
+      // This handles cases where onStop() failed to report.
       await this.checkContainerHealth();
 
-      // Then adjust pool size to maintain warmTarget
       await this.adjustPool();
-
-      // Keep warm containers alive by renewing their activity timeout
       await this.keepWarmContainersAlive();
     } catch (error) {
       console.error('Alarm handler error:', error);
     }
 
-    // Schedule next alarm
     await this.ctx.storage.setAlarm(Date.now() + this.config.refreshInterval);
   }
 
@@ -229,15 +244,24 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       this.config = { ...DEFAULT_CONFIG, ...storedConfig };
     }
 
+    const storedMaxInstances = await this.ctx.storage.get<number>('knownMaxInstances');
+    if (storedMaxInstances !== undefined) {
+      this.knownMaxInstances = storedMaxInstances;
+    }
+
     this.initialized = true;
 
-    // Schedule refresh alarm
     await this.scheduleRefresh();
   }
 
   private async persist(): Promise<void> {
     await this.ctx.storage.put('warmContainers', this.warmContainers);
     await this.ctx.storage.put('assignments', this.assignments);
+    if (this.knownMaxInstances !== null) {
+      await this.ctx.storage.put('knownMaxInstances', this.knownMaxInstances);
+    } else {
+      await this.ctx.storage.delete('knownMaxInstances');
+    }
   }
 
   private async scheduleRefresh(): Promise<void> {
@@ -254,12 +278,10 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   private removeContainer(containerUUID: string): boolean {
     let removed = false;
 
-    // Remove from warm containers if present
     if (this.warmContainers.delete(containerUUID)) {
       removed = true;
     }
 
-    // Find and remove from assignments if present
     for (const [userID, uuid] of this.assignments) {
       if (uuid === containerUUID) {
         this.assignments.delete(userID);
@@ -271,26 +293,49 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
     return removed;
   }
 
+  private remainingCapacity(): number {
+    if (this.knownMaxInstances === null) return Infinity;
+    return Math.max(0, this.knownMaxInstances - (this.warmContainers.size + this.assignments.size));
+  }
+
+  private isMaxInstancesError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes('Maximum number of running container instances exceeded');
+  }
+
+  private async recordCapacityLimit(): Promise<void> {
+    const currentTotal = this.warmContainers.size + this.assignments.size;
+    this.knownMaxInstances = currentTotal;
+    this.capacityExhausted = true;
+    console.warn(
+      `Hit max_instances limit. Inferred ceiling: ${currentTotal} ` +
+      `(${this.warmContainers.size} warm + ${this.assignments.size} assigned)`
+    );
+    await this.ctx.storage.put('knownMaxInstances', this.knownMaxInstances);
+  }
+
   /**
    * Start a new container and return its UUID
    */
   private async startContainer(): Promise<string | null> {
     const containerUUID = crypto.randomUUID();
 
-    // Track that we're starting this container to avoid false positives in health check
     this.startingContainers.add(containerUUID);
 
     try {
       const stub = this.getContainerStub(containerUUID);
       const rpc = stub as unknown as ContainerRpc;
 
-      // Start the container and wait for ports (container class handles port config)
       await rpc.startAndWaitForPorts();
 
       console.log(`Container ${containerUUID} started successfully`);
       return containerUUID;
     } catch (error) {
-      console.error(`Failed to start container ${containerUUID}:`, error);
+      if (this.isMaxInstancesError(error)) {
+        await this.recordCapacityLimit();
+      } else {
+        console.error(`Failed to start container ${containerUUID}:`, error);
+      }
       return null;
     } finally {
       this.startingContainers.delete(containerUUID);
@@ -298,13 +343,11 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Check if a container is still running by calling getState() RPC method
-   * 
-   * The Container class from @cloudflare/containers exposes getState() by default.
+   * Check if a container is still running by calling getState() RPC method.
    * A container is considered running only if its status is 'running' or 'healthy'.
    */
   private async isContainerRunning(containerUUID: string): Promise<boolean> {
-    // Don't check containers that are currently being started
+    // Skip containers that are currently being started
     if (this.startingContainers.has(containerUUID)) {
       return true;
     }
@@ -313,12 +356,10 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       const stub = this.getContainerStub(containerUUID);
       const container = stub as unknown as ContainerWithState;
       const state = await container.getState();
-      
-      // Container is running only if status is 'running' or 'healthy'
-      const isRunning = state.status === 'running' || state.status === 'healthy';
-      return isRunning;
+
+      return state.status === 'running' || state.status === 'healthy';
     } catch (error) {
-      // If the call fails, assume stopped - better to clean up and reassign
+      // If the RPC call fails, assume stopped — better to clean up and reassign
       // than to keep a stale reference
       console.warn(`Failed to check running status for ${containerUUID}, assuming stopped:`, error);
       return false;
@@ -326,8 +367,8 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Check all tracked containers and remove any that have stopped
-   * This provides resilience if onStop() fails to report
+   * Check all tracked containers and remove any that have stopped.
+   * Provides resilience if onStop() fails to report.
    */
   private async checkContainerHealth(): Promise<void> {
     const allContainerUUIDs = [
@@ -353,17 +394,49 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
   }
 
   /**
-   * Adjust the pool to maintain warmTarget containers ready
-   * - Starts new containers if below target
-   * - Stops excess containers if above target
+   * Scale the warm pool towards warmTarget, respecting the inferred max_instances limit.
+   * When at the limit, probes with a single start to detect if max_instances was raised.
    */
   private async adjustPool(): Promise<void> {
-    const diff = this.config.warmTarget - this.warmContainers.size;
+    let diff = this.config.warmTarget - this.warmContainers.size;
 
     if (diff > 0) {
-      // Need more warm containers - start them
-      console.log(`Scaling up pool: need ${diff} more warm containers`);
-      for (let i = 0; i < diff; i++) {
+      const capacity = this.remainingCapacity();
+
+      // Probe with one start to detect if max_instances was increased
+      if (capacity === 0 && this.knownMaxInstances !== null) {
+        console.log(
+          `Pool at inferred limit (${this.knownMaxInstances}), probing with 1 container to detect limit changes`
+        );
+        const probeUUID = await this.startContainer();
+        if (probeUUID) {
+          console.log('Probe succeeded — max_instances limit appears to have increased, clearing cached limit');
+          this.knownMaxInstances = null;
+          this.warmContainers.add(probeUUID);
+          diff--;
+          await this.persist();
+        } else {
+          await this.persist();
+          return;
+        }
+      }
+
+      const toStart = Math.min(diff, this.remainingCapacity());
+
+      if (toStart <= 0) {
+        console.log(
+          `Cannot scale up pool: need ${diff} warm containers but only ${this.remainingCapacity()} instance slots available ` +
+          `(${this.warmContainers.size} warm + ${this.assignments.size} assigned, limit: ${this.knownMaxInstances ?? 'unknown'})`
+        );
+        return;
+      }
+
+      console.log(`Scaling up pool: starting ${toStart} of ${diff} needed warm containers (capacity: ${this.remainingCapacity()})`);
+      for (let i = 0; i < toStart; i++) {
+        if (this.capacityExhausted) {
+          console.log('Capacity exhausted mid-loop, stopping further starts');
+          break;
+        }
         const containerUUID = await this.startContainer();
         if (containerUUID) {
           this.warmContainers.add(containerUUID);
@@ -371,10 +444,9 @@ export class WarmPool<Env extends { CONTAINER: DurableObjectNamespace } = { CONT
       }
       await this.persist();
     } else if (diff < 0) {
-      // Have too many warm containers - stop the excess
       const excess = -diff;
       console.log(`Scaling down pool: stopping ${excess} excess warm containers`);
-      
+
       const containersToStop = [...this.warmContainers].slice(0, excess);
       const stoppedContainers: string[] = [];
 

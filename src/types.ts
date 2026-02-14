@@ -47,4 +47,6 @@ export interface PoolStats {
   total: number;
   /** Current pool configuration */
   config: Required<PoolConfigInternal>;
+  /** Inferred max_instances limit, or `null` if not yet known */
+  maxInstances: number | null;
 }

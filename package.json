@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "engines": {
@@ -42,6 +43,7 @@
   "devDependencies": {
     "@cloudflare/containers": "^0.1.0",
     "@cloudflare/workers-types": "^4.20260212.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }
